@@ -2,11 +2,14 @@ import streamlit as st
 import os
 import zipfile
 import pandas as pd
-from openpyxl import load_workbook
+from openpyxl import load_workbook, Workbook
 import warnings
 import re
 import shutil
 import time
+from datetime import datetime
+from openpyxl.styles import Font, Alignment
+
 
 warnings.filterwarnings("ignore", category=UserWarning)
 st.set_page_config(
@@ -149,7 +152,7 @@ REQUIRED_COLUMNS = {
     "DN Note Reg": ["State", "Month"],
     "B2C PF": ["State", "Month", "LPF"],
     "CD Note Unreg": ["State", "Month"],
-    "Exempt Income": ["Row Labels", "Sum of Collection Intrest"],
+    "Exempt Income": ["Row Labels", "Sum of Collection Intrest", "Month"],
     # "GSTR1" and "B2C Onboarding" kept open because formats vary
 }
 
@@ -565,7 +568,7 @@ def run_gstr_process(
         ws["E8"] = 0
 
         # Keep your docs formatting fix
-        from openpyxl.styles import Font, Alignment
+
         ws_docs = wb["docs"]
         ws_docs["H4"] = ""
         for col in range(1, ws_docs.max_column + 1):
