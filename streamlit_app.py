@@ -482,6 +482,187 @@ def run_gstr_process(
                 ws[f"J{r}"] = row["SGST Amount"]
                 r += 1
 
+        # ======================================================
+        # ✅ HSN (B2C) – FULL BLOCK (WITH EXEMPT INCOME HSN)
+        # ======================================================
+        # Safe sheet getter (avoids sheet-name mismatch issue)
+        def get_sheet(wb, target_name):
+            def norm(x):
+                return str(x).strip().lower().replace(" ", "")
+            t = norm(target_name)
+            for s in wb.sheetnames:
+                if norm(s) == t:
+                    return wb[s]
+            return None
+
+        ws = get_sheet(wb, "hsn (b2c)")
+        if ws is None:
+            raise ValueError(f"Template is missing sheet: 'hsn (b2c)'. Available: {wb.sheetnames}")
+
+        r = 4
+
+        # -----------------------------------------
+        # 1️⃣ B2C data from B2B sheet (non-B2B invoices)
+        # -----------------------------------------
+        needed_cols = [
+            "HSN or SAC Code", "Total Transaction Value", "Item Taxable Value",
+            "IGST Amount", "CGST Amount", "SGST Amount"
+        ]
+
+        df_b2c_part1 = df_state_b2b[
+            df_state_b2b["Invoice Type"].astype(str).str.upper() != "B2B"
+        ].copy()
+
+        # If required columns missing, keep part1 empty (no crash)
+        if all(c in df_b2c_part1.columns for c in needed_cols):
+            df_b2c_part1 = df_b2c_part1[needed_cols].copy()
+            df_b2c_part1.rename(columns={"HSN or SAC Code": "HSN"}, inplace=True)
+            df_b2c_part1["HSN"] = df_b2c_part1["HSN"].astype(str).apply(clean_hsn)
+        else:
+            df_b2c_part1 = pd.DataFrame(columns=[
+                "HSN", "Total Transaction Value", "Item Taxable Value",
+                "IGST Amount", "CGST Amount", "SGST Amount"
+            ])
+
+        # -----------------------------------------
+        # 2️⃣ B2C PF data
+        # -----------------------------------------
+        df_b2c_pf_state = df_b2c_pf[
+            (df_b2c_pf["State"].astype(str).str.upper() == state) &
+            (df_b2c_pf["Month_norm"].str.contains(MONTH_NORM, na=False))
+        ].copy()
+
+        df_b2c_part2 = pd.DataFrame(columns=[
+            "HSN", "Total Transaction Value", "Item Taxable Value",
+            "IGST Amount", "CGST Amount", "SGST Amount"
+        ])
+
+        # This part only works if your B2C PF sheet has HSN column
+        if (not df_b2c_pf_state.empty) and ("HSN" in df_b2c_pf_state.columns):
+            df_b2c_part2 = pd.DataFrame({
+                "HSN": df_b2c_pf_state["HSN"].astype(str).apply(clean_hsn),
+                "Total Transaction Value": (
+                    df_b2c_pf_state.get("LPF", 0).fillna(0) +
+                    df_b2c_pf_state.get("IGST", 0).fillna(0) +
+                    df_b2c_pf_state.get("CGST", 0).fillna(0) +
+                    df_b2c_pf_state.get("SGST", 0).fillna(0)
+                ),
+                "Item Taxable Value": df_b2c_pf_state.get("LPF", 0).fillna(0),
+                "IGST Amount": df_b2c_pf_state.get("IGST", 0).fillna(0),
+                "CGST Amount": df_b2c_pf_state.get("CGST", 0).fillna(0),
+                "SGST Amount": df_b2c_pf_state.get("SGST", 0).fillna(0)
+            })
+
+        # -----------------------------------------
+        # 3️⃣ Combine B2C HSN data
+        # -----------------------------------------
+        df_hsn_b2c_all = pd.concat([df_b2c_part1, df_b2c_part2], ignore_index=True)
+
+        if df_hsn_b2c_all.empty:
+            df_hsn_b2c_grp = pd.DataFrame(columns=[
+                "HSN", "Total Transaction Value", "Item Taxable Value",
+                "IGST Amount", "CGST Amount", "SGST Amount"
+            ])
+        else:
+            df_hsn_b2c_grp = df_hsn_b2c_all.groupby("HSN", as_index=False)[[
+                "Total Transaction Value", "Item Taxable Value",
+                "IGST Amount", "CGST Amount", "SGST Amount"
+            ]].sum()
+
+        # -----------------------------------------
+        # 4️⃣ CD NOTE UNREG adjustment (POS independent, HSN wise)
+        # -----------------------------------------
+        df_cdun_state = filter_state_month(df_cdunreg, state, MONTH).copy()
+
+        df_cdun_hsn = pd.DataFrame(columns=[
+            "HSN", "Total Transaction Value", "Item Taxable Value",
+            "IGST Amount", "CGST Amount", "SGST Amount"
+        ])
+
+        if (not df_cdun_state.empty) and all(c in df_cdun_state.columns for c in needed_cols):
+            df_cdun_hsn = df_cdun_state[needed_cols].copy()
+            df_cdun_hsn.rename(columns={"HSN or SAC Code": "HSN"}, inplace=True)
+            df_cdun_hsn["HSN"] = df_cdun_hsn["HSN"].astype(str).apply(clean_hsn)
+
+        if df_cdun_hsn.empty:
+            df_cdun_grp = pd.DataFrame(columns=df_hsn_b2c_grp.columns)
+        else:
+            df_cdun_grp = df_cdun_hsn.groupby("HSN", as_index=False)[[
+                "Total Transaction Value", "Item Taxable Value",
+                "IGST Amount", "CGST Amount", "SGST Amount"
+            ]].sum()
+
+        if df_hsn_b2c_grp.empty:
+            df_final_b2c_hsn = df_hsn_b2c_grp.copy()
+        else:
+            df_final_b2c_hsn = df_hsn_b2c_grp.merge(
+                df_cdun_grp,
+                on="HSN",
+                how="left",
+                suffixes=("", "_CD")
+            ).fillna(0)
+
+            df_final_b2c_hsn["Total Transaction Value"] -= df_final_b2c_hsn.get("Total Transaction Value_CD", 0)
+            df_final_b2c_hsn["Item Taxable Value"] -= df_final_b2c_hsn.get("Item Taxable Value_CD", 0)
+            df_final_b2c_hsn["IGST Amount"] -= df_final_b2c_hsn.get("IGST Amount_CD", 0)
+            df_final_b2c_hsn["CGST Amount"] -= df_final_b2c_hsn.get("CGST Amount_CD", 0)
+            df_final_b2c_hsn["SGST Amount"] -= df_final_b2c_hsn.get("SGST Amount_CD", 0)
+
+            df_final_b2c_hsn = df_final_b2c_hsn[[
+                "HSN", "Total Transaction Value", "Item Taxable Value",
+                "IGST Amount", "CGST Amount", "SGST Amount"
+            ]].copy()
+
+        df_final_b2c_hsn[[
+            "Total Transaction Value", "Item Taxable Value",
+            "IGST Amount", "CGST Amount", "SGST Amount"
+        ]] = df_final_b2c_hsn[[
+            "Total Transaction Value", "Item Taxable Value",
+            "IGST Amount", "CGST Amount", "SGST Amount"
+        ]].clip(lower=0)
+
+        # -----------------------------------------
+        # 5️⃣ ADD EXEMPT INCOME HSN (NEW REQUIREMENT)
+        # -----------------------------------------
+        df_exempt_state = df_exempt[
+            df_exempt["Row Labels"].astype(str).str.upper().str.strip() == state
+        ].copy()
+
+        if "Month" in df_exempt_state.columns:
+            df_exempt_state = df_exempt_state[
+                df_exempt_state["Month"].astype(str).str.lower().str.contains(MONTH_NORM, na=False)
+            ]
+
+        if (not df_exempt_state.empty) and ("HSN or SAC Code" in df_exempt_state.columns):
+            df_exempt_hsn = pd.DataFrame({
+                "HSN": df_exempt_state["HSN or SAC Code"].astype(str).apply(clean_hsn),
+                "Total Transaction Value": df_exempt_state["Sum of Collection Intrest"].fillna(0),
+                "Item Taxable Value": df_exempt_state["Sum of Collection Intrest"].fillna(0),
+                "IGST Amount": 0,
+                "CGST Amount": 0,
+                "SGST Amount": 0
+            })
+
+            df_final_b2c_hsn = pd.concat([df_final_b2c_hsn, df_exempt_hsn], ignore_index=True)
+            df_final_b2c_hsn = df_final_b2c_hsn.groupby("HSN", as_index=False).sum()
+
+        # -----------------------------------------
+        # 6️⃣ Write to Excel
+        # -----------------------------------------
+        for _, row in df_final_b2c_hsn.iterrows():
+            ws[f"A{r}"] = row["HSN"]
+            ws[f"E{r}"] = row["Total Transaction Value"]
+            ws[f"F{r}"] = row["Item Taxable Value"]
+
+            # Rate = 0 only for HSN 997114, else 18
+            ws[f"G{r}"] = 0 if str(row["HSN"]).strip() == "997114" else 18
+
+            ws[f"H{r}"] = row["IGST Amount"]
+            ws[f"I{r}"] = row["CGST Amount"]
+            ws[f"J{r}"] = row["SGST Amount"]
+            r += 1
+
+
         # DOCS (as per your existing block)
         ws = wb["docs"]
 
