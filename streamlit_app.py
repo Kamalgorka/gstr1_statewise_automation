@@ -15,17 +15,19 @@ st.set_page_config(
     layout="wide"
 )
 
-UPLOAD_FOLDER = r"C:\Users\01388\Desktop\GSTR_Platform\uploads"
-OUTPUT_ROOT = r"C:\Users\01388\Desktop\GSTR_Platform\outputs"
-TEMPLATE_FILE = r"C:\Users\01388\Desktop\GSTR_1\GSTR1_Excel_Workbook_Template.xlsx"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+UPLOAD_FOLDER = os.path.join("/tmp", "uploads")
+OUTPUT_ROOT = os.path.join("/tmp", "outputs")
+TEMPLATE_FILE = os.path.join(BASE_DIR, "GSTR1_Excel_Workbook_Template.xlsx")
+LOG_FILE = os.path.join(OUTPUT_ROOT, "audit_log.xlsx")
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
-from datetime import datetime
-from openpyxl import Workbook, load_workbook
-
-LOG_FILE = r"C:\Users\01388\Desktop\GSTR_Platform\audit_log.xlsx"
+if not os.path.exists(TEMPLATE_FILE):
+    st.error(f"❌ Template file not found in app folder: {TEMPLATE_FILE}")
+    st.stop()
 
 
 def log_activity(action, month, filename):
