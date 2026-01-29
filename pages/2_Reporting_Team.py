@@ -915,68 +915,7 @@ if __name__ == "__main__":
     )
 
 
-import os
-import pandas as pd
-from datetime import datetime
-
-from openpyxl import load_workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
-
-FOLDER = r"C:\Users\01388\Desktop\Excess"
-
-FILES = [
-    os.path.join(FOLDER, "Repayment Summary IL.xlsx"),
-    os.path.join(FOLDER, "Repayment Summary JLG.xlsx"),
-]
-
-# Escalation mapping file
-ESCALATION_FILE = os.path.join(FOLDER, "Escalation.xlsx")
-ESCALATION_SHEET = "Sheet1"
-
-OUTPUT_SHEET_NAME = "Excess_Amount_Received"
-STAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-CONSOLIDATED_FILE = os.path.join(FOLDER, f"Excess Amount Received - Consolidated_{STAMP}.xlsx")
-CONSOLIDATED_CSV = os.path.join(FOLDER, f"Excess Amount Received - Consolidated_{STAMP}.csv")
-CONSOLIDATED_SHEET = "Consolidated"
-
-
-def norm_col(s: str) -> str:
-    return (
-        str(s).strip().upper()
-        .replace(" ", "")
-        .replace("-", "")
-        .replace(".", "")
-        .replace("\n", "")
-        .replace("\t", "")
-    )
-
-
-def find_col(df, required_name):
-    req = norm_col(required_name)
-    col_map = {norm_col(c): c for c in df.columns}
-    return col_map.get(req)
-
-
-def to_num(series):
-    return pd.to_numeric(series, errors="coerce").fillna(0)
-
-
-def read_sheet_with_status(file_path: str):
-    xl = pd.ExcelFile(file_path, engine="openpyxl")
-    for sh in xl.sheet_names:
-        df = xl.parse(sh)
-        if find_col(df, "Status") is not None:
-            return df, sh
-    df0 = xl.parse(xl.sheet_names[0])
-    return df0, xl.sheet_names[0]
-
-
-def load_escalation_map():
-    esc = pd.read_excel(ESCALATION_FILE, sheet_name=ESCALATION_SHEET, engine="openpyxl")
-
-    col_bc = find_col(esc, "Branch Code")
+find_col(esc, "Branch Code")
     col_maker = find_col(esc, "Maker")
 
     if col_bc is None or col_maker is None:
