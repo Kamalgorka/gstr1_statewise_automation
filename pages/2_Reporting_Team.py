@@ -368,8 +368,121 @@ def run_vault_cash_report(file_path: str):
     wb.save(file_path)
 NotImplementedError("Vault Cash logic not pasted yet")
 
-def run_pending_collection_entry(file_path: str):
-    raise NotImplementedError("Pending Collection logic not pasted yet")
+def run_pending_collection_entry(excel_path):
+    import pandas as pd
+    from openpyxl import load_workbook
+    from openpyxl.styles import Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    # -----------------------------
+    # 1) Read Details + Apply Filters
+    # -----------------------------
+    df = pd.read_excel(excel_path, sheet_name="Details")
+    df.columns = [str(c).strip() for c in df.columns]
+
+    required_cols = ["Sub Account", "Opening Credit", "Closing Credit", "Moving Debit", "Moving Credit"]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing column(s) in Details sheet: {missing}")
+
+    df_f = df.copy()
+    df_f = df_f[df_f["Closing Credit"].fillna(0) != 0]   # Closing Credit ≠ 0
+    df_f = df_f[df_f["Opening Credit"].fillna(0) != 0]   # Opening Credit ≠ 0
+    df_f = df_f[df_f["Moving Debit"].fillna(0) == 0]     # Moving Debit = 0
+    df_f = df_f[df_f["Moving Credit"].fillna(0) == 0]    # Moving Credit = 0
+
+    out_df = df_f[["Sub Account", "Opening Credit", "Closing Credit"]].copy()
+
+    # -----------------------------
+    # 2) Read Escalation + Lookup Maker Name
+    # -----------------------------
+    esc = pd.read_excel(excel_path, sheet_name="Escalation")
+    esc.columns = [str(c).strip() for c in esc.columns]
+
+    def norm(s):
+        return "".join(str(s).strip().lower().split())
+
+    norm_cols = {norm(c): c for c in esc.columns}
+
+    branch_candidates = ["branchcode", "branch_code", "branch", "subaccount", "sub_account"]
+    branch_col = None
+    for key in branch_candidates:
+        if key in norm_cols:
+            branch_col = norm_cols[key]
+            break
+    if branch_col is None:
+        raise ValueError(f"Could not find Branch Code column in Escalation. Columns: {list(esc.columns)}")
+
+    maker_candidates = ["makername", "maker_name", "maker", "makerusername", "makerid", "maker_id"]
+    maker_col = None
+    for key in [norm(x) for x in maker_candidates]:
+        if key in norm_cols:
+            maker_col = norm_cols[key]
+            break
+    if maker_col is None:
+        raise ValueError(f"Could not find Maker Name column in Escalation. Columns: {list(esc.columns)}")
+
+    esc_map = esc[[branch_col, maker_col]].dropna(subset=[branch_col]).copy()
+    esc_map[branch_col] = (
+        esc_map[branch_col]
+        .astype(str)
+        .str.replace(r"\.0$", "", regex=True)
+        .str.strip()
+    )
+    esc_map[maker_col] = esc_map[maker_col].astype(str).str.strip()
+
+    maker_lookup = dict(zip(esc_map[branch_col], esc_map[maker_col]))
+
+    out_df["Maker name"] = (
+        out_df["Sub Account"]
+        .astype(str)
+        .str.replace(r"\.0$", "", regex=True)
+        .str.strip()
+        .map(maker_lookup)
+        .fillna("")
+    )
+
+    out_df = out_df.rename(columns={"Sub Account": "Branch Code"})
+    out_df = out_df[["Maker name", "Branch Code", "Opening Credit", "Closing Credit"]]
+
+    # -----------------------------
+    # 3) Write to "summary" sheet
+    # -----------------------------
+    wb = load_workbook(excel_path)
+    if "summary" in wb.sheetnames:
+        wb.remove(wb["summary"])
+    ws = wb.create_sheet("summary")
+
+    header_font = Font(bold=True)
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    thin = Side(style="thin")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    # Header
+    for c, name in enumerate(out_df.columns, start=1):
+        cell = ws.cell(row=1, column=c, value=name)
+        cell.font = header_font
+        cell.alignment = header_align
+        cell.border = border
+
+    # Data
+    for r, row in enumerate(out_df.itertuples(index=False), start=2):
+        for c, val in enumerate(row, start=1):
+            cell = ws.cell(row=r, column=c, value=val)
+            cell.border = border
+            if c in (3, 4):
+                cell.number_format = "#,##0.00"
+
+    ws.freeze_panes = "A2"
+
+    # Auto width
+    for c in range(1, len(out_df.columns) + 1):
+        col = get_column_letter(c)
+        max_len = max(len(str(cell.value)) if cell.value else 0 for cell in ws[col])
+        ws.column_dimensions[col].width = min(max_len + 3, 40)
+
+    wb.save(excel_path)
+
 
 def run_demand_verification(file_path: str):
     raise NotImplementedError("Demand Verification logic not pasted yet")
