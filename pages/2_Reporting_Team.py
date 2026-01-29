@@ -1290,10 +1290,7 @@ if selected_report == "3) LPC Report":
 if selected_report == "4) Vault Cash Report":
 
     st.subheader("🏦 Vault Cash Report")
-    if run_vault_cash_report is None:
-        st.error("Vault Cash module is missing or not uploaded in GitHub.")
-        st.code(vault_err)
-        st.stop()
+
     uploaded = st.file_uploader("Upload Vault Cash Report.xlsx", type=["xlsx"], key="vault_cash")
 
     if uploaded:
