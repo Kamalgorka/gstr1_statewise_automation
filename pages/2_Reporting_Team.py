@@ -19,8 +19,354 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.utils import get_column_letter
+import re
+from collections import OrderedDict, defaultdict
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+# ----------------------------
+# Vault Cash Logic (Single-file version)
+# ----------------------------
+DEST_SHEET = "Filtered Sheet"
+ESC_SHEET = "Escalation"
+SUMMARY_SHEET = "Summary"
+
+NEEDED_VAULT = ["Branch", "Cash Date", "Vault Balance", "System Balance", "Cash Difference", "Modified By"]
+
+
+def find_header_row(ws, must_have=("Branch",), scan_rows=20):
+    for r in range(1, scan_rows + 1):
+        row_vals = [str(c.value).strip() if c.value is not None else "" for c in ws[r]]
+        if all(any(v.lower() == h.lower() for v in row_vals) for h in must_have):
+            return r
+    raise ValueError(f"Header row not found in sheet '{ws.title}' (scanned first {scan_rows} rows).")
+
+
+def build_col_map(ws, header_row):
+    col_map = {}
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(row=header_row, column=c).value
+        if v is None:
+            continue
+        key = str(v).strip()
+        if key:
+            col_map[key.lower()] = c
+    return col_map
+
+
+def split_branch(branch_text):
+    if branch_text is None:
+        return "", ""
+    s = str(branch_text).strip()
+    s = re.sub(r"\s*-\s*", "-", s)
+    if "-" in s:
+        code, name = s.split("-", 1)
+        return code.strip(), name.strip()
+    return s, ""
+
+
+def norm_code(x):
+    if x is None:
+        return ""
+    return str(x).strip().upper()
+
+
+def is_blank(v):
+    return v is None or str(v).strip() == ""
+
+
+def clear_below(ws, start_row, start_col=1, end_col=None):
+    if end_col is None:
+        end_col = ws.max_column
+    for r in range(start_row, ws.max_row + 1):
+        for c in range(start_col, end_col + 1):
+            ws.cell(row=r, column=c).value = None
+
+
+def apply_table_format(ws, min_row, max_row, min_col, max_col, header_row=None):
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for r in range(min_row, max_row + 1):
+        for c in range(min_col, max_col + 1):
+            cell = ws.cell(r, c)
+            cell.border = border
+            cell.alignment = Alignment(vertical="center")
+
+    if header_row:
+        header_fill = PatternFill("solid", fgColor="BDD7EE")
+        header_font = Font(bold=True)
+        for c in range(min_col, max_col + 1):
+            cell = ws.cell(header_row, c)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+
+def autofit_columns(ws, from_col, to_col, min_width=10, max_width=45):
+    for c in range(from_col, to_col + 1):
+        max_len = 0
+        col_letter = get_column_letter(c)
+        for cell in ws[col_letter]:
+            if cell.value is None:
+                continue
+            v = str(cell.value)
+            max_len = max(max_len, len(v))
+        width = max(min_width, min(max_width, max_len + 2))
+        ws.column_dimensions[col_letter].width = width
+
+
+def build_summary_from_filtered(wb, ws_filtered, dst_cols, data_start_row, data_end_row):
+    if SUMMARY_SHEET in wb.sheetnames:
+        ws_sum = wb[SUMMARY_SHEET]
+        wb.remove(ws_sum)
+    ws_sum = wb.create_sheet(SUMMARY_SHEET)
+
+    zone_order = OrderedDict()
+    counts = defaultdict(int)
+
+    for r in range(data_start_row, data_end_row + 1):
+        zone = ws_filtered.cell(r, dst_cols["zone"]).value
+        region = ws_filtered.cell(r, dst_cols["region"]).value
+        remarks = ws_filtered.cell(r, dst_cols["remarks"]).value
+
+        if is_blank(zone) or is_blank(region) or is_blank(remarks):
+            continue
+
+        z = str(zone).strip()
+        reg = str(region).strip()
+        rem = str(remarks).strip()
+
+        if z not in zone_order:
+            zone_order[z] = True
+
+        counts[(z, reg, rem)] += 1
+
+    headers = ["Zone", "Region", "Filled by branch", "Not Filled by Branch", "Count of Branches"]
+    ws_sum.append(headers)
+
+    block_fills = [
+        PatternFill("solid", fgColor="F8CBAD"),
+        PatternFill("solid", fgColor="D9D9D9"),
+        PatternFill("solid", fgColor="FFE699"),
+        PatternFill("solid", fgColor="C6E0B4"),
+    ]
+    total_font = Font(bold=True)
+    center = Alignment(horizontal="center", vertical="center")
+    left = Alignment(horizontal="left", vertical="center")
+
+    current_row = 2
+    grand_filled = 0
+    grand_not = 0
+    grand_total = 0
+
+    def regions_for_zone(z):
+        regs = set()
+        for (zz, rr, _rem) in counts.keys():
+            if zz == z:
+                regs.add(rr)
+        return sorted(regs)
+
+    zone_index = 0
+    for z in zone_order.keys():
+        fill = block_fills[zone_index % len(block_fills)]
+        zone_index += 1
+
+        z_filled_sum = 0
+        z_not_sum = 0
+        z_total_sum = 0
+
+        for reg in regions_for_zone(z):
+            filled_cnt = counts.get((z, reg, "Filled by Branch"), 0)
+            not_cnt = counts.get((z, reg, "Not Filled by Branch"), 0)
+            total_cnt = filled_cnt + not_cnt
+
+            ws_sum.cell(current_row, 1).value = z
+            ws_sum.cell(current_row, 2).value = reg
+            ws_sum.cell(current_row, 3).value = filled_cnt
+            ws_sum.cell(current_row, 4).value = not_cnt if not_cnt != 0 else "-"
+            ws_sum.cell(current_row, 5).value = total_cnt
+
+            for c in range(1, 6):
+                cell = ws_sum.cell(current_row, c)
+                cell.fill = fill
+                cell.alignment = center if c >= 3 else left
+
+            z_filled_sum += filled_cnt
+            z_not_sum += not_cnt
+            z_total_sum += total_cnt
+            current_row += 1
+
+        ws_sum.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=2)
+        ws_sum.cell(current_row, 1).value = f"{z} Total"
+        ws_sum.cell(current_row, 3).value = z_filled_sum
+        ws_sum.cell(current_row, 4).value = z_not_sum if z_not_sum != 0 else "-"
+        ws_sum.cell(current_row, 5).value = z_total_sum
+
+        for c in range(1, 6):
+            cell = ws_sum.cell(current_row, c)
+            cell.fill = fill
+            cell.font = total_font
+            cell.alignment = center if c >= 3 else left
+
+        current_row += 1
+        grand_filled += z_filled_sum
+        grand_not += z_not_sum
+        grand_total += z_total_sum
+
+    grand_fill = PatternFill("solid", fgColor="9BC2E6")
+    ws_sum.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=2)
+    ws_sum.cell(current_row, 1).value = "Grand Total"
+    ws_sum.cell(current_row, 3).value = grand_filled
+    ws_sum.cell(current_row, 4).value = grand_not if grand_not != 0 else "-"
+    ws_sum.cell(current_row, 5).value = grand_total
+
+    for c in range(1, 6):
+        cell = ws_sum.cell(current_row, c)
+        cell.fill = grand_fill
+        cell.font = Font(bold=True, color="000000")
+        cell.alignment = center if c >= 3 else left
+
+    apply_table_format(ws_sum, min_row=1, max_row=current_row, min_col=1, max_col=5, header_row=1)
+
+    for r in range(2, current_row + 1):
+        ws_sum.cell(r, 1).alignment = left
+        ws_sum.cell(r, 2).alignment = left
+        for c in (3, 4, 5):
+            ws_sum.cell(r, c).alignment = center
+
+    ws_sum.freeze_panes = "A2"
+    autofit_columns(ws_sum, 1, 5)
+    return ws_sum
+
+
 def run_vault_cash_report(file_path: str):
-    raise NotImplementedError("Vault Cash logic not pasted yet")
+    wb = load_workbook(file_path)
+
+    # ✅ AUTO FIX: choose "Vault" if "Valut" not present
+    possible_src = ["Valut", "Vault"]
+    SRC_SHEET = next((s for s in possible_src if s in wb.sheetnames), None)
+    if SRC_SHEET is None:
+        raise ValueError(f"Vault sheet not found. Expected one of {possible_src}. Found: {wb.sheetnames}")
+
+    for sh in (SRC_SHEET, DEST_SHEET, ESC_SHEET):
+        if sh not in wb.sheetnames:
+            raise ValueError(f"Sheet '{sh}' not found. Available: {wb.sheetnames}")
+
+    ws_src = wb[SRC_SHEET]
+    ws_dst = wb[DEST_SHEET]
+    ws_esc = wb[ESC_SHEET]
+
+    esc_header_row = find_header_row(ws_esc, must_have=("Branch Code",))
+    esc_cols = build_col_map(ws_esc, esc_header_row)
+
+    required_esc = ["branch code", "branch name", "zone", "region"]
+    miss_esc = [x for x in required_esc if x not in esc_cols]
+    if miss_esc:
+        raise ValueError(f"Missing these headers in '{ESC_SHEET}' sheet: {miss_esc}")
+
+    esc_map = {}
+    for r in range(esc_header_row + 1, ws_esc.max_row + 1):
+        code = norm_code(ws_esc.cell(r, esc_cols["branch code"]).value)
+        if not code:
+            continue
+        if code not in esc_map:
+            esc_map[code] = {
+                "zone": ws_esc.cell(r, esc_cols["zone"]).value,
+                "region": ws_esc.cell(r, esc_cols["region"]).value,
+                "branch_name": ws_esc.cell(r, esc_cols["branch name"]).value,
+            }
+
+    dst_header_row = find_header_row(ws_dst, must_have=("Code", "Branch"))
+    dst_cols = build_col_map(ws_dst, dst_header_row)
+
+    dst_needed = ["Zone", "Region", "Code", "Branch", "Cash Date", "Vault Balance",
+                  "System Balance", "Cash Difference", "Modified By", "Remarks"]
+    dst_missing = [h for h in dst_needed if h.lower() not in dst_cols]
+    if dst_missing:
+        raise ValueError(f"Missing these headers in '{DEST_SHEET}': {dst_missing}")
+
+    src_header_row = find_header_row(ws_src, must_have=("Branch",))
+    src_cols = build_col_map(ws_src, src_header_row)
+
+    miss_vault = [h for h in NEEDED_VAULT if h.lower() not in src_cols]
+    if miss_vault:
+        raise ValueError(f"Missing these headers in '{SRC_SHEET}': {miss_vault}")
+    if "created by" not in src_cols:
+        raise ValueError(f"Missing 'Created By' header in '{SRC_SHEET}' sheet (needed to fill Modified By).")
+
+    dst_write_start = 2
+    clear_below(ws_dst, start_row=dst_write_start)
+
+    out_r = dst_write_start
+    seen_codes_vault = set()
+
+    for r in range(src_header_row + 1, ws_src.max_row + 1):
+        row_is_blank = True
+        for h in NEEDED_VAULT:
+            if ws_src.cell(r, src_cols[h.lower()]).value not in (None, ""):
+                row_is_blank = False
+                break
+        if row_is_blank:
+            continue
+
+        branch_val = ws_src.cell(r, src_cols["branch"]).value
+        code, branch_name_from_vault = split_branch(branch_val)
+        code_n = norm_code(code)
+        if not code_n:
+            continue
+
+        if code_n in seen_codes_vault:
+            continue
+        seen_codes_vault.add(code_n)
+
+        esc = esc_map.get(code_n, {})
+        zone_val = esc.get("zone")
+        region_val = esc.get("region")
+
+        branch_name = esc.get("branch_name")
+        if is_blank(branch_name):
+            branch_name = branch_name_from_vault
+
+        ws_dst.cell(out_r, dst_cols["zone"]).value = zone_val
+        ws_dst.cell(out_r, dst_cols["region"]).value = region_val
+        ws_dst.cell(out_r, dst_cols["code"]).value = code
+        ws_dst.cell(out_r, dst_cols["branch"]).value = branch_name
+
+        for col_name in ["Cash Date", "Vault Balance", "System Balance", "Cash Difference"]:
+            ws_dst.cell(out_r, dst_cols[col_name.lower()]).value = ws_src.cell(r, src_cols[col_name.lower()]).value
+
+        mod_by = ws_src.cell(r, src_cols["modified by"]).value
+        if is_blank(mod_by):
+            mod_by = ws_src.cell(r, src_cols["created by"]).value
+        ws_dst.cell(out_r, dst_cols["modified by"]).value = mod_by
+
+        ws_dst.cell(out_r, dst_cols["remarks"]).value = "Filled by Branch"
+        out_r += 1
+
+    present_codes = set(seen_codes_vault)
+    for code_n, info in esc_map.items():
+        if code_n in present_codes:
+            continue
+        ws_dst.cell(out_r, dst_cols["zone"]).value = info.get("zone")
+        ws_dst.cell(out_r, dst_cols["region"]).value = info.get("region")
+        ws_dst.cell(out_r, dst_cols["code"]).value = code_n
+        ws_dst.cell(out_r, dst_cols["branch"]).value = info.get("branch_name")
+        ws_dst.cell(out_r, dst_cols["remarks"]).value = "Not Filled by Branch"
+        out_r += 1
+
+    last_data_row = out_r - 1
+
+    build_summary_from_filtered(
+        wb=wb,
+        ws_filtered=ws_dst,
+        dst_cols=dst_cols,
+        data_start_row=dst_write_start,
+        data_end_row=last_data_row
+    )
+
+    wb.save(file_path)
+NotImplementedError("Vault Cash logic not pasted yet")
 
 def run_pending_collection_entry(file_path: str):
     raise NotImplementedError("Pending Collection logic not pasted yet")
