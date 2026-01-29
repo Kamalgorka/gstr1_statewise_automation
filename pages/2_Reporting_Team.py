@@ -19,13 +19,15 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.utils import get_column_letter
-from Vault_Cash import run_vault_cash_report
-from Pending_Collection import run_pending_collection_entry
-from Demand_Verification import run_demand_verification
-from Branch_MAP import run_map_ledger_difference
-from Excess_Amount import run_from_streamlit
-from CPP_Payable import run_cpp_payable_vs_cpp_ledger_difference
-from CMS_Recon import run_cms_recon_streamlit
+# Option A (Single file in GitHub): no external imports
+run_vault_cash_report = None
+run_pending_collection_entry = None
+run_demand_verification = None
+run_map_ledger_difference = None
+run_from_streamlit = None
+run_cpp_payable_vs_cpp_ledger_difference = None
+run_cms_recon_streamlit = None
+
 
 
 # ============================================================
