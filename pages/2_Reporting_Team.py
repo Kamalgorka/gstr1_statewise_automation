@@ -21,9 +21,10 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.utils import get_column_letter
 # Option A (Single file in GitHub): no external imports
 def run_vault_cash_report(file_path: str):
-    global FILE_PATH
-    FILE_PATH = file_path   # because your script uses FILE_PATH variable
-    main()
+    # Option A (single file): vault cash logic must exist inside THIS file.
+    # For now, raise clear message instead of NameError.
+    raise Exception("Vault Cash logic not added yet in this single-file. Please paste Vault_Cash.py code into 2_Reporting_Team.py and call it here.")
+
 run_pending_collection_entry = None
 run_demand_verification = None
 run_map_ledger_difference = None
