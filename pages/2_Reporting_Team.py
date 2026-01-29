@@ -886,23 +886,9 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-FOLDER = r"C:\Users\01388\Desktop\Excess"
-
-FILES = [
-    os.path.join(FOLDER, "Repayment Summary IL.xlsx"),
-    os.path.join(FOLDER, "Repayment Summary JLG.xlsx"),
-]
-
-# Escalation mapping file
-ESCALATION_FILE = os.path.join(FOLDER, "Escalation.xlsx")
-ESCALATION_SHEET = "Sheet1"
-
 OUTPUT_SHEET_NAME = "Excess_Amount_Received"
-STAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-CONSOLIDATED_FILE = os.path.join(FOLDER, f"Excess Amount Received - Consolidated_{STAMP}.xlsx")
-CONSOLIDATED_CSV = os.path.join(FOLDER, f"Excess Amount Received - Consolidated_{STAMP}.csv")
 CONSOLIDATED_SHEET = "Consolidated"
+ESCALATION_SHEET = "Sheet1"
 
 
 def norm_col(s: str) -> str:
@@ -936,8 +922,8 @@ def read_sheet_with_status(file_path: str):
     return df0, xl.sheet_names[0]
 
 
-def load_escalation_map():
-    esc = pd.read_excel(ESCALATION_FILE, sheet_name=ESCALATION_SHEET, engine="openpyxl")
+def load_escalation_map(escalation_path: str):
+    esc = pd.read_excel(escalation_path, sheet_name=ESCALATION_SHEET, engine="openpyxl")
 
     col_bc = find_col(esc, "Branch Code")
     col_maker = find_col(esc, "Maker")
@@ -950,7 +936,6 @@ def load_escalation_map():
     esc[col_maker] = esc[col_maker].astype(str).str.strip()
 
     esc = esc[(esc[col_bc] != "") & (esc[col_bc].str.lower() != "nan")]
-
     return dict(zip(esc[col_bc], esc[col_maker]))
 
 
@@ -1009,11 +994,8 @@ def build_required_format(df, escalation_map):
     return out
 
 
-def process_file(file_path: str, escalation_map):
-    print(f"\n--- Processing: {file_path}")
-
+def process_file(file_path: str, escalation_map, write_back=True):
     df, sheet_used = read_sheet_with_status(file_path)
-    print(f"Sheet used: {sheet_used}")
 
     col_status = find_col(df, "Status")
     col_amount = find_col(df, "Amount")
@@ -1046,15 +1028,10 @@ def process_file(file_path: str, escalation_map):
     df2 = df2[df2["Excess Amount"] >= 1].copy()
     df2 = df2[df2[col_lpc] <= 0].copy()
 
-    print(f"Final rows after filters: {len(df2)}")
-
-    try:
+    # Optional: Write back sheet into uploaded file
+    if write_back:
         with pd.ExcelWriter(file_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
             df2.to_excel(writer, sheet_name=OUTPUT_SHEET_NAME, index=False)
-        print(f"Saved sheet '{OUTPUT_SHEET_NAME}' in {os.path.basename(file_path)}")
-    except Exception as e:
-        print("⚠ Could not write back into source file (maybe open in Excel).")
-        print("Error:", e)
 
     return build_required_format(df2, escalation_map)
 
@@ -1094,7 +1071,7 @@ def format_consolidated_excel(xlsx_path: str, sheet_name: str):
         max_len = 0
         for r in range(1, max_row + 1):
             val = ws.cell(row=r, column=c).value
-            if val:
+            if val is not None and str(val).strip() != "":
                 max_len = max(max_len, len(str(val)))
         ws.column_dimensions[col_letter].width = min(max_len + 2, 45)
 
@@ -1102,66 +1079,34 @@ def format_consolidated_excel(xlsx_path: str, sheet_name: str):
     wb.close()
 
 
-def main():
-    print("Folder:", FOLDER)
-    print("Files in folder:", os.listdir(FOLDER))
-
-    escalation_map = load_escalation_map()
-    print(f"Escalation mapping loaded: {len(escalation_map)} branch codes")
+def run_excess_amount_from_streamlit(il_path: str, jlg_path: str, escalation_path: str, output_dir: str):
+    """
+    Streamlit-safe runner.
+    - il_path: temp saved uploaded Repayment Summary IL.xlsx
+    - jlg_path: temp saved uploaded Repayment Summary JLG.xlsx
+    - escalation_path: temp saved uploaded Escalation.xlsx
+    - output_dir: temp folder to write consolidated output
+    Returns: consolidated_xlsx_path
+    """
+    escalation_map = load_escalation_map(escalation_path)
 
     all_data = []
-    for f in FILES:
-        try:
-            req_df = process_file(f, escalation_map)
-            all_data.append(req_df)
-        except Exception as e:
-            print(f"❌ Failed for {os.path.basename(f)}")
-            print("Reason:", e)
-
-    if not all_data:
-        print("\n❌ No data produced, consolidated not created.")
-        return
+    for f in [il_path, jlg_path]:
+        req_df = process_file(f, escalation_map, write_back=True)
+        all_data.append(req_df)
 
     consolidated = pd.concat(all_data, ignore_index=True)
-    print("\nTotal consolidated rows:", len(consolidated))
-
-    consolidated.to_csv(CONSOLIDATED_CSV, index=False)
-    with pd.ExcelWriter(CONSOLIDATED_FILE, engine="openpyxl", mode="w") as writer:
-        consolidated.to_excel(writer, sheet_name=CONSOLIDATED_SHEET, index=False)
-
-    format_consolidated_excel(CONSOLIDATED_FILE, CONSOLIDATED_SHEET)
-
-    print("\n✅ Consolidated saved:")
-    print(CONSOLIDATED_FILE)
-    print("✅ Backup CSV saved:")
-    print(CONSOLIDATED_CSV)
-def run_from_streamlit(folder_path: str):
-    global FOLDER, FILES, ESCALATION_FILE, CONSOLIDATED_FILE, CONSOLIDATED_CSV
-
-    FOLDER = folder_path
-
-    FILES = [
-        os.path.join(FOLDER, "Repayment Summary IL.xlsx"),
-        os.path.join(FOLDER, "Repayment Summary JLG.xlsx"),
-    ]
-
-    ESCALATION_FILE = os.path.join(FOLDER, "Escalation.xlsx")
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    CONSOLIDATED_FILE = os.path.join(
-        FOLDER, f"Excess Amount Received - Consolidated_{stamp}.xlsx"
-    )
-    CONSOLIDATED_CSV = os.path.join(
-        FOLDER, f"Excess Amount Received - Consolidated_{stamp}.csv"
-    )
+    consolidated_file = os.path.join(output_dir, f"Excess Amount Received - Consolidated_{stamp}.xlsx")
 
-    main()   # run your existing logic
+    with pd.ExcelWriter(consolidated_file, engine="openpyxl", mode="w") as writer:
+        consolidated.to_excel(writer, sheet_name=CONSOLIDATED_SHEET, index=False)
 
-    return CONSOLIDATED_FILE
+    format_consolidated_excel(consolidated_file, CONSOLIDATED_SHEET)
 
+    return consolidated_file
 
-if __name__ == "__main__":
-    main()
 
 # ============================================================
 # PAGE UI
