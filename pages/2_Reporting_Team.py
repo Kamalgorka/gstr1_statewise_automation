@@ -2047,7 +2047,62 @@ ul[role="listbox"] li[aria-selected="true"] {
 div[data-testid="stSelectbox"]{
     max-width: 50% !important;   /* half width */
 }
+/* =============== FILE UPLOADER COMPACT =============== */
+div[data-testid="stFileUploader"] section{
+  padding: 6px 10px !important;
+}
+div[data-testid="stFileUploader"] section > div{
+  gap: 6px !important;
+}
 
+/* reduce the drag-drop box height */
+div[data-testid="stFileUploaderDropzone"]{
+  padding: 8px 10px !important;
+  min-height: 56px !important;
+}
+
+/* reduce inner text size */
+div[data-testid="stFileUploaderDropzone"] *{
+  font-size: 0.90rem !important;
+}
+
+/* reduce Browse files button height */
+div[data-testid="stFileUploader"] button{
+  padding: 6px 12px !important;
+  min-height: 34px !important;
+  height: 34px !important;
+}
+/* =============== SIDEBAR WIDTH =============== */
+section[data-testid="stSidebar"]{
+  width: 230px !important;          /* change 230 -> 200/260 as you like */
+}
+section[data-testid="stSidebar"] > div{
+  width: 230px !important;
+}
+div[data-testid="stSidebarCollapsedControl"]{
+  left: 230px !important;
+}
+
+/* =============== PAGE TOP SPACE / HEADER SIZE =============== */
+.main .block-container{
+  padding-top: 1.2rem !important;   /* reduce top empty space */
+  padding-bottom: 2rem !important;
+  max-width: 1200px;                /* optional: avoid too wide */
+}
+
+/* Reduce big title size */
+h1{
+  font-size: 2.0rem !important;     /* reduce headline */
+  margin-bottom: 0.4rem !important;
+}
+
+/* If you have a big subtitle / markdown under title */
+.small-subtitle{
+  margin-top: -6px !important;
+  margin-bottom: 8px !important;
+  font-size: 0.95rem !important;
+  opacity: 0.85;
+}
 </style>
 """, unsafe_allow_html=True)
 
