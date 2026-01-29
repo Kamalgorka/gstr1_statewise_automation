@@ -908,10 +908,6 @@ def run_map_ledger_difference(map_file_path, ledger_file_path):
 
 # Optional local test
 if __name__ == "__main__":
-    run_map_ledger_difference(
-        r"C:\Users\01388\Desktop\MAP.xlsx",
-        r"C:\Users\01388\Desktop\MAP Ledger.xlsx"
-    )
 
 
 
