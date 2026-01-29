@@ -2103,6 +2103,20 @@ h1{
   font-size: 0.95rem !important;
   opacity: 0.85;
 }
+/* Hide the default "streamlit app" label */
+section[data-testid="stSidebar"] .stMarkdown:first-child {
+    display: none;
+}
+
+/* Insert our own "Teams" heading */
+section[data-testid="stSidebar"]::before {
+    content: "Teams";
+    display: block;
+    padding: 14px 12px 6px 12px;
+    font-size: 1.25rem;     /* bigger than HO Team */
+    font-weight: 700;
+    color: #1f2937;
+}
 </style>
 """, unsafe_allow_html=True)
 
