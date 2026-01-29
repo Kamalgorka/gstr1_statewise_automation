@@ -20,7 +20,10 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.utils import get_column_letter
 # Option A (Single file in GitHub): no external imports
-run_vault_cash_report = None
+def run_vault_cash_report(file_path: str):
+    global FILE_PATH
+    FILE_PATH = file_path   # because your script uses FILE_PATH variable
+    main()
 run_pending_collection_entry = None
 run_demand_verification = None
 run_map_ledger_difference = None
