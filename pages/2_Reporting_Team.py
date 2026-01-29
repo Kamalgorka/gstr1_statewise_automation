@@ -701,25 +701,6 @@ def is_branch_id(val):
     return bool(re.match(r"^B\d+", s, re.IGNORECASE))
 
 
-def force_excel_recalc_and_save(path):
-    """
-    Forces Excel to recalc formulas and save cached values.
-    REQUIRED because openpyxl does not calculate Excel formulas.
-    """
-    import xlwings as xw
-
-    app = xw.App(visible=False)
-    app.display_alerts = False
-    app.screen_updating = False
-    try:
-        wb = app.books.open(path)
-        app.calculate()
-        wb.save()
-        wb.close()
-    finally:
-        app.quit()
-
-
 def create_consolidated_sheet(map_file_path):
     """
     Creates/updates 'Consolidated' sheet in MAP.xlsx by taking only rows where:
