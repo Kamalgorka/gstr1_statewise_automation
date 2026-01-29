@@ -675,17 +675,1301 @@ def run_demand_verification(file_path: str):
     wb.save(file_path)
 
 
-def run_map_ledger_difference(map_path: str, ledger_path: str):
-    raise NotImplementedError("MAP logic not pasted yet")
+import re
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
 
+TOL = 0.000001
+
+
+def to_num(x):
+    try:
+        if x is None or x == "":
+            return 0.0
+        return float(x)
+    except:
+        return 0.0
+
+
+def norm(s):
+    return str(s).strip().lower() if s is not None else ""
+
+
+def is_branch_id(val):
+    s = str(val).strip() if val is not None else ""
+    return bool(re.match(r"^B\d+", s, re.IGNORECASE))
+
+
+def force_excel_recalc_and_save(path):
+    """
+    Forces Excel to recalc formulas and save cached values.
+    REQUIRED because openpyxl does not calculate Excel formulas.
+    """
+    import xlwings as xw
+
+    app = xw.App(visible=False)
+    app.display_alerts = False
+    app.screen_updating = False
+    try:
+        wb = app.books.open(path)
+        app.calculate()
+        wb.save()
+        wb.close()
+    finally:
+        app.quit()
+
+
+def create_consolidated_sheet(map_file_path):
+    """
+    Creates/updates 'Consolidated' sheet in MAP.xlsx by taking only rows where:
+      - Column A = 'Closing Balance'
+      - Column B starts with 'B' (Branch ID)
+    Copies columns A to I (A..I, where I is Balance Amount)
+    """
+    CONSOL_SHEET = "Consolidated"
+
+    # Ensure formulas (like Balance Amount) are calculated and cached
+    force_excel_recalc_and_save(map_file_path)
+
+    COL_REGION = "A"
+    COL_BRANCH = "B"
+    COPY_COLS = ["A", "B", "C", "D", "E", "F", "G", "H", "I"]
+
+    # Read calculated values
+    wb_val = load_workbook(map_file_path, data_only=True)
+    # Write workbook
+    wb = load_workbook(map_file_path)
+
+    if CONSOL_SHEET in wb.sheetnames:
+        del wb[CONSOL_SHEET]
+
+    ws_out = wb.create_sheet(CONSOL_SHEET, 0)
+    ws_out.append(["Source Sheet"] + COPY_COLS)
+
+    for sh in wb.sheetnames:
+        if sh == CONSOL_SHEET:
+            continue
+
+        ws = wb[sh]
+        ws_v = wb_val[sh]
+
+        for r in range(1, ws.max_row + 1):
+            region_val = ws[f"{COL_REGION}{r}"].value
+            branch_val = ws[f"{COL_BRANCH}{r}"].value
+
+            if norm(region_val) == "closing balance" and is_branch_id(branch_val):
+                row_data = [sh]
+                for col in COPY_COLS:
+                    row_data.append(ws_v[f"{col}{r}"].value)
+                ws_out.append(row_data)
+
+    wb.save(map_file_path)
+
+
+def format_difference_sheet(ws):
+    """
+    Applies:
+    - Sky blue header + bold
+    - Borders on full range
+    - Auto column width
+    - Row height
+    """
+    header_fill = PatternFill(start_color="B7DEE8", end_color="B7DEE8", fill_type="solid")
+    bold_font = Font(bold=True)
+
+    # Header style
+    for cell in ws[1]:
+        cell.font = bold_font
+        cell.fill = header_fill
+
+    # Borders
+    thin = Side(style="thin")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    max_row = ws.max_row
+    max_col = ws.max_column
+
+    for r in range(1, max_row + 1):
+        for c in range(1, max_col + 1):
+            ws.cell(r, c).border = border
+
+    # Auto column width
+    for c in range(1, max_col + 1):
+        col_letter = get_column_letter(c)
+        max_len = 0
+        for r in range(1, max_row + 1):
+            v = ws.cell(r, c).value
+            if v is not None:
+                max_len = max(max_len, len(str(v)))
+        ws.column_dimensions[col_letter].width = max_len + 3
+
+    # Row height
+    for r in range(1, max_row + 1):
+        ws.row_dimensions[r].height = 20
+
+    # Freeze header row
+    ws.freeze_panes = "A2"
+
+
+def run_map_ledger_difference(map_file_path, ledger_file_path):
+    CONSOL_SHEET = "Consolidated"
+    LEDGER_SHEET = "Ledger"
+    ESC_SHEET = "Escalation"
+    DIFF_SHEET = "Difference"
+
+    # Step 0: Create/Update Consolidated in MAP.xlsx (with Excel recalc)
+    create_consolidated_sheet(map_file_path)
+
+    # 1) Read MAP Consolidated
+    df_map = pd.read_excel(map_file_path, sheet_name=CONSOL_SHEET, engine="openpyxl")
+    branch_col = "B"
+    balance_col = "I"
+
+    df_map[branch_col] = df_map[branch_col].astype(str).str.strip()
+    df_map[balance_col] = pd.to_numeric(df_map[balance_col], errors="coerce").fillna(0)
+    map_balance_by_branch = df_map.set_index(branch_col)[balance_col].to_dict()
+
+    # 2) Open MAP Ledger workbook
+    wb = load_workbook(ledger_file_path)
+    ws_ledger = wb[LEDGER_SHEET]
+    ws_esc = wb[ESC_SHEET]
+
+    # 3) Escalation mapping Branch Code -> Maker (Executive Name)
+    esc_headers = {}
+    for c in range(1, ws_esc.max_column + 1):
+        h = ws_esc.cell(1, c).value
+        if h:
+            esc_headers[norm(h)] = c
+
+    col_branch_code = esc_headers.get("branch code")
+    col_maker = esc_headers.get("maker")
+    if not col_branch_code or not col_maker:
+        raise Exception("Escalation sheet must have headers: 'Branch Code' and 'Maker' in row 1")
+
+    exec_by_branch = {}
+    for r in range(2, ws_esc.max_row + 1):
+        bc = ws_esc.cell(r, col_branch_code).value
+        mk = ws_esc.cell(r, col_maker).value
+        if bc is None:
+            continue
+        exec_by_branch[str(bc).strip()] = "" if mk is None else str(mk).strip()
+
+    # 4) Ledger columns
+    ledger_headers = {}
+    for c in range(1, ws_ledger.max_column + 1):
+        h = ws_ledger.cell(1, c).value
+        if h:
+            ledger_headers[norm(h)] = c
+
+    sub_acc_col = ledger_headers.get("sub account")
+    debit_col = ledger_headers.get("closing debit")
+    credit_col = ledger_headers.get("closing credit")
+    if not (sub_acc_col and debit_col and credit_col):
+        raise Exception("Ledger sheet must have headers: 'Sub Account', 'Closing Debit', 'Closing Credit' in row 1")
+
+    # 5) Create/Replace Difference sheet
+    if DIFF_SHEET in wb.sheetnames:
+        del wb[DIFF_SHEET]
+    ws_diff = wb.create_sheet(DIFF_SHEET)
+
+    ws_diff.append([
+        "Executive Name",
+        "Branch Code",
+        "Ledger Balance (Cl.Credit-Cl.Debit)",
+        "MAP Sheet Balance",
+        "Difference"
+    ])
+
+    # 6) Only difference rows
+    for r in range(2, ws_ledger.max_row + 1):
+        sub_acc = ws_ledger.cell(r, sub_acc_col).value
+        if sub_acc is None or str(sub_acc).strip() == "":
+            continue
+
+        key = str(sub_acc).strip()
+
+        closing_credit = to_num(ws_ledger.cell(r, credit_col).value)
+        closing_debit = to_num(ws_ledger.cell(r, debit_col).value)
+        final_balance = closing_credit - closing_debit
+
+        map_balance = to_num(map_balance_by_branch.get(key, 0))
+        diff = final_balance - map_balance
+
+        if abs(diff) > TOL:
+            exec_name = exec_by_branch.get(key, "")
+            ws_diff.append([exec_name, key, final_balance, map_balance, diff])
+
+    # Formatting
+    format_difference_sheet(ws_diff)
+
+    wb.save(ledger_file_path)
+
+
+# Optional local test
+if __name__ == "__main__":
+    run_map_ledger_difference(
+        r"C:\Users\01388\Desktop\MAP.xlsx",
+        r"C:\Users\01388\Desktop\MAP Ledger.xlsx"
+    )
+
+
+import os
+import pandas as pd
+from datetime import datetime
+
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+FOLDER = r"C:\Users\01388\Desktop\Excess"
+
+FILES = [
+    os.path.join(FOLDER, "Repayment Summary IL.xlsx"),
+    os.path.join(FOLDER, "Repayment Summary JLG.xlsx"),
+]
+
+# Escalation mapping file
+ESCALATION_FILE = os.path.join(FOLDER, "Escalation.xlsx")
+ESCALATION_SHEET = "Sheet1"
+
+OUTPUT_SHEET_NAME = "Excess_Amount_Received"
+STAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+CONSOLIDATED_FILE = os.path.join(FOLDER, f"Excess Amount Received - Consolidated_{STAMP}.xlsx")
+CONSOLIDATED_CSV = os.path.join(FOLDER, f"Excess Amount Received - Consolidated_{STAMP}.csv")
+CONSOLIDATED_SHEET = "Consolidated"
+
+
+def norm_col(s: str) -> str:
+    return (
+        str(s).strip().upper()
+        .replace(" ", "")
+        .replace("-", "")
+        .replace(".", "")
+        .replace("\n", "")
+        .replace("\t", "")
+    )
+
+
+def find_col(df, required_name):
+    req = norm_col(required_name)
+    col_map = {norm_col(c): c for c in df.columns}
+    return col_map.get(req)
+
+
+def to_num(series):
+    return pd.to_numeric(series, errors="coerce").fillna(0)
+
+
+def read_sheet_with_status(file_path: str):
+    xl = pd.ExcelFile(file_path, engine="openpyxl")
+    for sh in xl.sheet_names:
+        df = xl.parse(sh)
+        if find_col(df, "Status") is not None:
+            return df, sh
+    df0 = xl.parse(xl.sheet_names[0])
+    return df0, xl.sheet_names[0]
+
+
+def load_escalation_map():
+    esc = pd.read_excel(ESCALATION_FILE, sheet_name=ESCALATION_SHEET, engine="openpyxl")
+
+    col_bc = find_col(esc, "Branch Code")
+    col_maker = find_col(esc, "Maker")
+
+    if col_bc is None or col_maker is None:
+        raise ValueError("Escalation.xlsx must contain 'Branch Code' and 'Maker' columns in Sheet1")
+
+    esc = esc[[col_bc, col_maker]].copy()
+    esc[col_bc] = esc[col_bc].astype(str).str.strip()
+    esc[col_maker] = esc[col_maker].astype(str).str.strip()
+
+    esc = esc[(esc[col_bc] != "") & (esc[col_bc].str.lower() != "nan")]
+
+    return dict(zip(esc[col_bc], esc[col_maker]))
+
+
+def build_required_format(df, escalation_map):
+    col_zone = find_col(df, "zone")
+    col_region = find_col(df, "Region")
+    col_branch_code = find_col(df, "Branch Code")
+    col_branch = find_col(df, "BRANCH_NAME")
+
+    col_loan = find_col(df, "LOAN_ID")
+    col_cust = find_col(df, "CUST_ID")
+    col_date = find_col(df, "COLLECTION_DATE")
+
+    col_amount = find_col(df, "Amount")
+    col_principal = find_col(df, "PRINCIPAL_COLLECTED")
+    col_interest = find_col(df, "INTEREST_COLLECTED")
+
+    col_excess = find_col(df, "Excess Amount") or "Excess Amount"
+
+    missing = []
+    for nm, col in [
+        ("zone", col_zone),
+        ("Region", col_region),
+        ("Branch Code", col_branch_code),
+        ("BRANCH_NAME", col_branch),
+        ("LOAN_ID", col_loan),
+        ("CUST_ID", col_cust),
+        ("COLLECTION_DATE", col_date),
+        ("Amount", col_amount),
+        ("PRINCIPAL_COLLECTED", col_principal),
+        ("INTEREST_COLLECTED", col_interest),
+    ]:
+        if col is None:
+            missing.append(nm)
+    if missing:
+        raise ValueError(f"Missing required columns for final format: {missing}")
+
+    branch_code_series = df[col_branch_code].astype(str).str.strip()
+    executive_series = branch_code_series.map(escalation_map).fillna("")
+
+    out = pd.DataFrame({
+        "Zone": df[col_zone],
+        "Region": df[col_region],
+        "Branch Code": df[col_branch_code],
+        "Branch": df[col_branch],
+        "Executive": executive_series,
+        "Loan_Id": df[col_loan],
+        "Cust_Id": df[col_cust],
+        "Collection_Date": df[col_date],
+        "Amount": df[col_amount],
+        "Principal_Collected": df[col_principal],
+        "Interest_Collected": df[col_interest],
+        "Excess Amount": df[col_excess],
+    })
+
+    return out
+
+
+def process_file(file_path: str, escalation_map):
+    print(f"\n--- Processing: {file_path}")
+
+    df, sheet_used = read_sheet_with_status(file_path)
+    print(f"Sheet used: {sheet_used}")
+
+    col_status = find_col(df, "Status")
+    col_amount = find_col(df, "Amount")
+    col_principal = find_col(df, "PRINCIPAL_COLLECTED")
+    col_interest = find_col(df, "INTEREST_COLLECTED")
+    col_lpc = find_col(df, "Late_Payment_charges")
+
+    missing = []
+    for name, col in [
+        ("Status", col_status),
+        ("Amount", col_amount),
+        ("PRINCIPAL_COLLECTED", col_principal),
+        ("INTEREST_COLLECTED", col_interest),
+        ("Late_Payment_charges", col_lpc),
+    ]:
+        if col is None:
+            missing.append(name)
+    if missing:
+        raise ValueError(f"Missing column(s) in {os.path.basename(file_path)}: {missing}")
+
+    df2 = df[df[col_status].astype(str).str.strip().str.lower() == "processed"].copy()
+
+    df2[col_amount] = to_num(df2[col_amount])
+    df2[col_principal] = to_num(df2[col_principal])
+    df2[col_interest] = to_num(df2[col_interest])
+    df2[col_lpc] = to_num(df2[col_lpc])
+
+    df2["Excess Amount"] = df2[col_amount] - (df2[col_principal] + df2[col_interest])
+
+    df2 = df2[df2["Excess Amount"] >= 1].copy()
+    df2 = df2[df2[col_lpc] <= 0].copy()
+
+    print(f"Final rows after filters: {len(df2)}")
+
+    try:
+        with pd.ExcelWriter(file_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+            df2.to_excel(writer, sheet_name=OUTPUT_SHEET_NAME, index=False)
+        print(f"Saved sheet '{OUTPUT_SHEET_NAME}' in {os.path.basename(file_path)}")
+    except Exception as e:
+        print("⚠ Could not write back into source file (maybe open in Excel).")
+        print("Error:", e)
+
+    return build_required_format(df2, escalation_map)
+
+
+def format_consolidated_excel(xlsx_path: str, sheet_name: str):
+    wb = load_workbook(xlsx_path)
+    ws = wb[sheet_name]
+
+    header_fill = PatternFill(start_color="87CEEB", end_color="87CEEB", fill_type="solid")
+    header_font = Font(bold=True, color="000000")
+    header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    thin = Side(style="thin", color="000000")
+    thin_border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    max_row = ws.max_row
+    max_col = ws.max_column
+
+    ws.freeze_panes = "A2"
+
+    for c in range(1, max_col + 1):
+        cell = ws.cell(row=1, column=c)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_alignment
+        cell.border = thin_border
+
+    data_alignment = Alignment(vertical="center")
+    for r in range(2, max_row + 1):
+        for c in range(1, max_col + 1):
+            cell = ws.cell(row=r, column=c)
+            cell.border = thin_border
+            cell.alignment = data_alignment
+
+    for c in range(1, max_col + 1):
+        col_letter = get_column_letter(c)
+        max_len = 0
+        for r in range(1, max_row + 1):
+            val = ws.cell(row=r, column=c).value
+            if val:
+                max_len = max(max_len, len(str(val)))
+        ws.column_dimensions[col_letter].width = min(max_len + 2, 45)
+
+    wb.save(xlsx_path)
+    wb.close()
+
+
+def main():
+    print("Folder:", FOLDER)
+    print("Files in folder:", os.listdir(FOLDER))
+
+    escalation_map = load_escalation_map()
+    print(f"Escalation mapping loaded: {len(escalation_map)} branch codes")
+
+    all_data = []
+    for f in FILES:
+        try:
+            req_df = process_file(f, escalation_map)
+            all_data.append(req_df)
+        except Exception as e:
+            print(f"❌ Failed for {os.path.basename(f)}")
+            print("Reason:", e)
+
+    if not all_data:
+        print("\n❌ No data produced, consolidated not created.")
+        return
+
+    consolidated = pd.concat(all_data, ignore_index=True)
+    print("\nTotal consolidated rows:", len(consolidated))
+
+    consolidated.to_csv(CONSOLIDATED_CSV, index=False)
+    with pd.ExcelWriter(CONSOLIDATED_FILE, engine="openpyxl", mode="w") as writer:
+        consolidated.to_excel(writer, sheet_name=CONSOLIDATED_SHEET, index=False)
+
+    format_consolidated_excel(CONSOLIDATED_FILE, CONSOLIDATED_SHEET)
+
+    print("\n✅ Consolidated saved:")
+    print(CONSOLIDATED_FILE)
+    print("✅ Backup CSV saved:")
+    print(CONSOLIDATED_CSV)
 def run_from_streamlit(folder_path: str):
-    raise NotImplementedError("Excess Amount logic not pasted yet")
+    global FOLDER, FILES, ESCALATION_FILE, CONSOLIDATED_FILE, CONSOLIDATED_CSV
 
-def run_cpp_payable_vs_cpp_ledger_difference(cpp_payable_path: str, cpp_ledger_path: str):
-    raise NotImplementedError("CPP logic not pasted yet")
+    FOLDER = folder_path
 
-def run_cms_recon_streamlit(format_path: str, statements_folder: str, ledger_path: str, output_path: str):
-    raise NotImplementedError("CMS logic not pasted yet")
+    FILES = [
+        os.path.join(FOLDER, "Repayment Summary IL.xlsx"),
+        os.path.join(FOLDER, "Repayment Summary JLG.xlsx"),
+    ]
+
+    ESCALATION_FILE = os.path.join(FOLDER, "Escalation.xlsx")
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    CONSOLIDATED_FILE = os.path.join(
+        FOLDER, f"Excess Amount Received - Consolidated_{stamp}.xlsx"
+    )
+    CONSOLIDATED_CSV = os.path.join(
+        FOLDER, f"Excess Amount Received - Consolidated_{stamp}.csv"
+    )
+
+    main()   # run your existing logic
+
+    return CONSOLIDATED_FILE
+
+
+if __name__ == "__main__":
+    main()
+
+
+import re
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
+
+TOL = 0.000001
+
+
+def to_num(x):
+    try:
+        if x is None or x == "":
+            return 0.0
+        return float(x)
+    except:
+        return 0.0
+
+
+def norm(s):
+    return str(s).strip().lower() if s is not None else ""
+
+
+def is_branch_id(val):
+    s = str(val).strip() if val is not None else ""
+    return bool(re.match(r"^B\d+", s, re.IGNORECASE))
+
+
+def force_excel_recalc_and_save(path):
+    """
+    Forces Excel to recalc formulas and save cached values.
+    REQUIRED because openpyxl does not calculate Excel formulas.
+    """
+    import xlwings as xw
+
+    app = xw.App(visible=False)
+    app.display_alerts = False
+    app.screen_updating = False
+    try:
+        wb = app.books.open(path)
+        app.calculate()
+        wb.save()
+        wb.close()
+    finally:
+        app.quit()
+
+
+def create_consolidated_sheet_cpp_payable(cpp_payable_file_path):
+    """
+    Creates/updates 'Consolidated' sheet in CPP Payable file (same logic as MAP):
+      - Column A = 'Closing Balance'
+      - Column B starts with 'B' (Branch ID)
+    Copies columns A to I
+    """
+    CONSOL_SHEET = "Consolidated"
+
+    # Ensure formulas (like Balance Amount) are calculated and cached
+    force_excel_recalc_and_save(cpp_payable_file_path)
+
+    COL_REGION = "A"
+    COL_BRANCH = "B"
+    COPY_COLS = ["A", "B", "C", "D", "E", "F", "G", "H", "I"]
+
+    # Read calculated values
+    wb_val = load_workbook(cpp_payable_file_path, data_only=True)
+    # Write workbook
+    wb = load_workbook(cpp_payable_file_path)
+
+    if CONSOL_SHEET in wb.sheetnames:
+        del wb[CONSOL_SHEET]
+
+    ws_out = wb.create_sheet(CONSOL_SHEET, 0)
+    ws_out.append(["Source Sheet"] + COPY_COLS)
+
+    for sh in wb.sheetnames:
+        if sh == CONSOL_SHEET:
+            continue
+
+        ws = wb[sh]
+        ws_v = wb_val[sh]
+
+        for r in range(1, ws.max_row + 1):
+            region_val = ws[f"{COL_REGION}{r}"].value
+            branch_val = ws[f"{COL_BRANCH}{r}"].value
+
+            if norm(region_val) == "closing balance" and is_branch_id(branch_val):
+                row_data = [sh]
+                for col in COPY_COLS:
+                    row_data.append(ws_v[f"{col}{r}"].value)
+                ws_out.append(row_data)
+
+    wb.save(cpp_payable_file_path)
+
+
+def format_difference_sheet(ws):
+    """
+    Applies:
+    - Sky blue header + bold
+    - Borders on full range
+    - Auto column width
+    - Row height
+    - Freeze header row
+    """
+    header_fill = PatternFill(start_color="B7DEE8", end_color="B7DEE8", fill_type="solid")
+    bold_font = Font(bold=True)
+
+    for cell in ws[1]:
+        cell.font = bold_font
+        cell.fill = header_fill
+
+    thin = Side(style="thin")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    max_row = ws.max_row
+    max_col = ws.max_column
+
+    for r in range(1, max_row + 1):
+        for c in range(1, max_col + 1):
+            ws.cell(r, c).border = border
+
+    for c in range(1, max_col + 1):
+        col_letter = get_column_letter(c)
+        max_len = 0
+        for r in range(1, max_row + 1):
+            v = ws.cell(r, c).value
+            if v is not None:
+                max_len = max(max_len, len(str(v)))
+        ws.column_dimensions[col_letter].width = max_len + 3
+
+    for r in range(1, max_row + 1):
+        ws.row_dimensions[r].height = 20
+
+    ws.freeze_panes = "A2"
+
+
+def run_cpp_payable_vs_cpp_ledger_difference(cpp_payable_file_path, cpp_ledger_file_path):
+    """
+    Same logic as MAP vs MAP Ledger:
+    - Create/Update Consolidated in CPP Payable file
+    - Compare with CPP Ledger file (Ledger + Escalation sheets)
+    - Create Difference sheet in CPP Ledger file
+    """
+    CONSOL_SHEET = "Consolidated"
+    LEDGER_SHEET = "Ledger"
+    ESC_SHEET = "Escalation"
+    DIFF_SHEET = "Difference"
+
+    # Step 0: Create/Update Consolidated in CPP Payable file
+    create_consolidated_sheet_cpp_payable(cpp_payable_file_path)
+
+    # 1) Read CPP Payable Consolidated
+    df_payable = pd.read_excel(cpp_payable_file_path, sheet_name=CONSOL_SHEET, engine="openpyxl")
+    branch_col = "B"
+    balance_col = "I"
+
+    df_payable[branch_col] = df_payable[branch_col].astype(str).str.strip()
+    df_payable[balance_col] = pd.to_numeric(df_payable[balance_col], errors="coerce").fillna(0)
+    payable_balance_by_branch = df_payable.set_index(branch_col)[balance_col].to_dict()
+
+    # 2) Open CPP Ledger workbook
+    wb = load_workbook(cpp_ledger_file_path)
+    ws_ledger = wb[LEDGER_SHEET]
+    ws_esc = wb[ESC_SHEET]
+
+    # 3) Escalation mapping Branch Code -> Maker (Executive Name)
+    esc_headers = {}
+    for c in range(1, ws_esc.max_column + 1):
+        h = ws_esc.cell(1, c).value
+        if h:
+            esc_headers[norm(h)] = c
+
+    col_branch_code = esc_headers.get("branch code")
+    col_maker = esc_headers.get("maker")
+    if not col_branch_code or not col_maker:
+        raise Exception("Escalation sheet must have headers: 'Branch Code' and 'Maker' in row 1")
+
+    exec_by_branch = {}
+    for r in range(2, ws_esc.max_row + 1):
+        bc = ws_esc.cell(r, col_branch_code).value
+        mk = ws_esc.cell(r, col_maker).value
+        if bc is None:
+            continue
+        exec_by_branch[str(bc).strip()] = "" if mk is None else str(mk).strip()
+
+    # 4) Ledger columns
+    ledger_headers = {}
+    for c in range(1, ws_ledger.max_column + 1):
+        h = ws_ledger.cell(1, c).value
+        if h:
+            ledger_headers[norm(h)] = c
+
+    sub_acc_col = ledger_headers.get("sub account")
+    debit_col = ledger_headers.get("closing debit")
+    credit_col = ledger_headers.get("closing credit")
+    if not (sub_acc_col and debit_col and credit_col):
+        raise Exception("Ledger sheet must have headers: 'Sub Account', 'Closing Debit', 'Closing Credit' in row 1")
+
+    # 5) Create/Replace Difference sheet
+    if DIFF_SHEET in wb.sheetnames:
+        del wb[DIFF_SHEET]
+    ws_diff = wb.create_sheet(DIFF_SHEET)
+
+    ws_diff.append([
+        "Executive Name",
+        "Branch Code",
+        "Ledger Balance (Cl.Credit-Cl.Debit)",
+        "CPP Payable Sheet Balance",
+        "Difference"
+    ])
+
+    # 6) Only difference rows
+    for r in range(2, ws_ledger.max_row + 1):
+        sub_acc = ws_ledger.cell(r, sub_acc_col).value
+        if sub_acc is None or str(sub_acc).strip() == "":
+            continue
+
+        key = str(sub_acc).strip()
+
+        closing_credit = to_num(ws_ledger.cell(r, credit_col).value)
+        closing_debit = to_num(ws_ledger.cell(r, debit_col).value)
+        final_balance = closing_credit - closing_debit
+
+        payable_balance = to_num(payable_balance_by_branch.get(key, 0))
+        diff = final_balance - payable_balance
+
+        if abs(diff) > TOL:
+            exec_name = exec_by_branch.get(key, "")
+            ws_diff.append([exec_name, key, final_balance, payable_balance, diff])
+
+    # Formatting
+    format_difference_sheet(ws_diff)
+
+    wb.save(cpp_ledger_file_path)
+
+
+# Optional local test
+if __name__ == "__main__":
+    # Update file paths as per your system
+    CPP_PAYABLE_FILE = r"C:\Users\01388\Desktop\CPP Payable.xlsx"
+    CPP_LEDGER_FILE = r"C:\Users\01388\Desktop\CPP Ledger.xlsx"
+
+    run_cpp_payable_vs_cpp_ledger_difference(CPP_PAYABLE_FILE, CPP_LEDGER_FILE)
+
+
+import os
+import re
+import pandas as pd
+from openpyxl import load_workbook, Workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
+
+# =========================
+# PATHS (update if needed)
+# =========================
+FORMAT_FILE = r"C:\Users\01388\Desktop\CMS Recon Sheet.xlsx"
+STATEMENTS_FOLDER = r"C:\Users\01388\Desktop\BS"
+CMS_LEDGER_FILE = r"C:\Users\01388\Desktop\CMS Ledger.xlsx"
+OUTPUT_FILE = r"C:\Users\01388\Desktop\Consolidate CMS Recon.xlsx"
+
+# =========================
+# LEDGER MAPPING RULES
+# =========================
+# NOTE: Twinline is NOT removed now (because we need it for ledger)
+LEDGER_REMOVE_ACCOUNTS = {
+    "roi net - c",
+    "ease buzz-c",
+    "cms deposit a/c"
+}
+
+ACCOUNT_RENAME_MAP = {
+    "spice money - c": "SPICE",
+    "airtel payments bank - c": "Airtel",
+    "fino payments bank - c": "FINO",
+    "fingpay - c": "FINGPAY",
+    "axis bbps - c": "BBPS",
+    "airpay-c": "AIRPAY",
+    "idfc cms": "IDFC",
+    "twinline  - c": "TWINLINE",      # ✅ ADDED
+    "twinline - c": "TWINLINE",       # ✅ ADDED (both spacing variants)
+}
+
+# =========================
+# HELPERS
+# =========================
+def safe_sheet_name_from_path(path: str) -> str:
+    name = os.path.splitext(os.path.basename(path))[0]
+    name = re.sub(r"[\[\]\:\*\?\/\\]", " ", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name[:31] if len(name) > 31 else name
+
+def normalize_branch_code_generic(x) -> str:
+    """
+    Used for STATEMENTS side (branch codes in many formats).
+    Converts to B + 4 digits if any digits found.
+    """
+    if x is None:
+        return ""
+    s = str(x).strip().upper()
+    if not s:
+        return ""
+
+    # MMF0005 -> B0005
+    if "MMF" in s:
+        digits = re.sub(r"\D", "", s)
+        digits = digits[-4:] if len(digits) >= 4 else digits.zfill(4)
+        return "B" + digits.zfill(4)
+
+    # "Branch Code-0501" -> B0501
+    if "BRANCH" in s and "-" in s:
+        part = s.split("-")[-1]
+        digits = re.sub(r"\D", "", part)
+        return "B" + digits.zfill(4)
+
+    # "B0494-Jalesar" -> B0494
+    m = re.search(r"\bB\d{4}\b", s)
+    if m:
+        return m.group(0)
+
+    digits = re.sub(r"\D", "", s)
+    if not digits:
+        return ""
+    return "B" + digits.zfill(4)
+
+def normalize_ledger_code_strict(x) -> str:
+    """
+    ✅ Used ONLY for CMS LEDGER side.
+    Rules:
+      - If code starts with HO (HO001 etc) -> IGNORE (return "")
+      - If code is already Bxxxx -> keep
+      - If code is purely digits (e.g., 471) -> B0471
+      - Otherwise ignore
+    """
+    if x is None:
+        return ""
+    s = str(x).strip().upper()
+    if not s:
+        return ""
+
+    if s.startswith("HO"):
+        return ""
+
+    if re.fullmatch(r"B\d{4}", s):
+        return s
+
+    if re.fullmatch(r"\d{1,4}", s):
+        return "B" + s.zfill(4)
+
+    digits = re.sub(r"\D", "", s)
+    if digits and len(digits) <= 4:
+        return "B" + digits.zfill(4)
+
+    return ""
+
+def apply_formatting(ws, last_row: int, last_col: int):
+    header_fill = PatternFill("solid", fgColor="D9D9D9")
+    header_font = Font(bold=True, color="1F4E79")
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    for c in range(1, last_col + 1):
+        cell = ws.cell(row=1, column=c)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center
+        cell.border = border
+
+    for r in range(2, last_row + 1):
+        for c in range(1, last_col + 1):
+            cell = ws.cell(row=r, column=c)
+            cell.border = border
+            cell.alignment = center
+
+    ws.freeze_panes = "A2"
+
+    for c in range(1, last_col + 1):
+        col_letter = get_column_letter(c)
+        max_len = 0
+        for r in range(1, last_row + 1):
+            v = ws.cell(row=r, column=c).value
+            if v is None:
+                continue
+            max_len = max(max_len, len(str(v)))
+        ws.column_dimensions[col_letter].width = min(max(10, max_len + 2), 45)
+
+def list_statement_files(folder: str):
+    exts = (".xlsx", ".xls", ".csv")
+    files = []
+    for f in os.listdir(folder):
+        if f.lower().endswith(exts):
+            files.append(os.path.join(folder, f))
+    files.sort()
+    return files
+
+def _clean_colname(c) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(c).strip().lower())
+
+def find_col_fuzzy(df: pd.DataFrame, expected: str):
+    exp = _clean_colname(expected)
+    for c in df.columns:
+        if _clean_colname(c) == exp:
+            return c
+    for c in df.columns:
+        if exp in _clean_colname(c):
+            return c
+    return None
+
+def build_branch_amount_map(df: pd.DataFrame, branch_col: str, amount_col: str) -> dict:
+    work = df[[branch_col, amount_col]].copy()
+    work[branch_col] = work[branch_col].apply(normalize_branch_code_generic)
+    work[amount_col] = pd.to_numeric(work[amount_col], errors="coerce").fillna(0)
+    grp = work.groupby(branch_col, dropna=False)[amount_col].sum()
+    return {str(k): float(v) for k, v in grp.items() if str(k).strip()}
+
+# =========================
+# FINO HEADER DETECTION (.xls)
+# =========================
+def _detect_header_row_excel(path: str, engine: str, max_scan_rows: int = 20) -> int:
+    preview = pd.read_excel(path, header=None, engine=engine, nrows=max_scan_rows)
+    required_any = {"status", "amount", "branchid"}
+    for r in range(len(preview)):
+        row_vals = ["" if pd.isna(x) else str(x) for x in preview.iloc[r].tolist()]
+        cleaned = {_clean_colname(x) for x in row_vals}
+        if len(required_any.intersection(cleaned)) >= 2:
+            return r
+    return 2
+
+def read_statement(path: str) -> pd.DataFrame:
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".csv":
+        return pd.read_csv(path)
+    if ext == ".xlsx":
+        return pd.read_excel(path)
+    if ext == ".xls":
+        engine = "xlrd"
+        header_row = _detect_header_row_excel(path, engine=engine)
+        return pd.read_excel(path, header=header_row, engine=engine)
+    raise ValueError(f"Unsupported file type: {path}")
+
+# =========================
+# GENERIC SUCCESS FILTER
+# =========================
+def _filter_success_generic(df: pd.DataFrame, status_col: str) -> pd.DataFrame:
+    s = df[status_col].astype(str).str.strip().str.lower()
+    # keep rows having success and not failed
+    ok = s.str.contains("success", na=False) | s.isin(["successful", "success", "transaction successful"])
+    bad = s.str.contains("fail", na=False) | s.str.contains("revers", na=False)
+    return df[ok & (~bad)].copy()
+
+# =========================
+# STATEMENT EXTRACTION
+# =========================
+def extract_for_sheet(sheet_name: str, file_path: str):
+    try:
+        df = read_statement(file_path)
+        s = sheet_name.strip().lower()
+
+        if s == "airpay":
+            status_col = find_col_fuzzy(df, "Transaction Status") or find_col_fuzzy(df, "Status")
+            branch_col = find_col_fuzzy(df, "Branch Code")
+            amount_col = find_col_fuzzy(df, "Amount")
+            if not status_col or not branch_col or not amount_col:
+                return {}, 0.0, "AIRPAY: columns missing"
+            df[status_col] = df[status_col].astype(str).str.strip().str.lower()
+            df_f = df[df[status_col] != "failed"].copy()
+            total = pd.to_numeric(df_f[amount_col], errors="coerce").fillna(0).sum()
+            return build_branch_amount_map(df_f, branch_col, amount_col), float(total), ""
+
+        if s == "airtel":
+            amount_col = find_col_fuzzy(df, "ORIG_AMNT")
+            branch_col = find_col_fuzzy(df, "Additional Information 2")
+            if not branch_col or not amount_col:
+                return {}, 0.0, "AIRTEL: columns missing"
+            total = pd.to_numeric(df[amount_col], errors="coerce").fillna(0).sum()
+            return build_branch_amount_map(df, branch_col, amount_col), float(total), ""
+
+        if s == "bbps":
+            status_col = find_col_fuzzy(df, "Payment Status")
+            branch_col = find_col_fuzzy(df, "B CODE")
+            amount_col = find_col_fuzzy(df, "Bill Amount") or find_col_fuzzy(df, "Transaction Amount")
+            if not status_col or not branch_col or not amount_col:
+                return {}, 0.0, "BBPS: columns missing"
+            df[status_col] = df[status_col].astype(str).str.strip().str.lower()
+            df_f = df[df[status_col] == "successful"].copy()
+            total = pd.to_numeric(df_f[amount_col], errors="coerce").fillna(0).sum()
+            return build_branch_amount_map(df_f, branch_col, amount_col), float(total), ""
+
+        if s == "fingpay":
+            status_col = find_col_fuzzy(df, "Status Message")
+            amount_col = find_col_fuzzy(df, "Drop Amount")
+            branch_col = find_col_fuzzy(df, "Branch Code")
+            if not status_col or not branch_col or not amount_col:
+                return {}, 0.0, "FINGPAY: columns missing"
+            df[status_col] = df[status_col].astype(str).str.strip().str.lower()
+            df_f = df[df[status_col].str.contains("success", na=False)].copy()
+            total = pd.to_numeric(df_f[amount_col], errors="coerce").fillna(0).sum()
+            return build_branch_amount_map(df_f, branch_col, amount_col), float(total), ""
+
+        if s == "spice":
+            status_col = find_col_fuzzy(df, "Status")
+            amount_col = find_col_fuzzy(df, "Amount")
+            branch_col = find_col_fuzzy(df, "Branch ID")
+            if not status_col or not branch_col or not amount_col:
+                return {}, 0.0, "SPICE: columns missing"
+            df[status_col] = df[status_col].astype(str).str.strip().str.upper()
+            df_f = df[df[status_col] == "SUCCESS"].copy()
+            total = pd.to_numeric(df_f[amount_col], errors="coerce").fillna(0).sum()
+            return build_branch_amount_map(df_f, branch_col, amount_col), float(total), ""
+
+        if s == "fino":
+            status_col = find_col_fuzzy(df, "Status")
+            amount_col = find_col_fuzzy(df, "AMOUNT")
+            branch_col = find_col_fuzzy(df, "Branch ID")
+            if not status_col or not branch_col or not amount_col:
+                return {}, 0.0, f"FINO: columns missing. Found: {list(df.columns)}"
+            df[status_col] = df[status_col].astype(str).str.strip().str.lower()
+            df_f = df[df[status_col].str.contains("successful", na=False) | df[status_col].str.contains("success", na=False)].copy()
+            total = pd.to_numeric(df_f[amount_col], errors="coerce").fillna(0).sum()
+            return build_branch_amount_map(df_f, branch_col, amount_col), float(total), ""
+
+        # ✅ NEW: TWINLINE extraction (flexible)
+        if s == "twinline":
+            # Try to auto-detect columns
+            branch_candidates = ["Branch Code", "Branch", "Branch ID", "B CODE", "Code", "Additional Information 2"]
+            amount_candidates = ["Amount", "AMOUNT", "Transaction Amount", "Bill Amount", "ORIG_AMNT", "Drop Amount", "Net", "Net Amount"]
+            status_candidates = ["Status", "Transaction Status", "Payment Status", "Status Message"]
+
+            branch_col = None
+            for x in branch_candidates:
+                branch_col = find_col_fuzzy(df, x)
+                if branch_col:
+                    break
+
+            amount_col = None
+            for x in amount_candidates:
+                amount_col = find_col_fuzzy(df, x)
+                if amount_col:
+                    break
+
+            status_col = None
+            for x in status_candidates:
+                status_col = find_col_fuzzy(df, x)
+                if status_col:
+                    break
+
+            if not branch_col or not amount_col:
+                return {}, 0.0, f"TWINLINE: branch/amount columns not found. Found: {list(df.columns)}"
+
+            df_f = df.copy()
+            if status_col:
+                df_f = _filter_success_generic(df_f, status_col)
+
+            total = pd.to_numeric(df_f[amount_col], errors="coerce").fillna(0).sum()
+            return build_branch_amount_map(df_f, branch_col, amount_col), float(total), ""
+
+        return {}, 0.0, "NOT CONFIGURED"
+
+    except Exception as e:
+        return {}, 0.0, str(e)
+
+# =========================
+# LEDGER: Branch mapping via Branch ID / Description / code
+# =========================
+def normalize_branch_from_branchid(x) -> str:
+    if x is None:
+        return ""
+    s = str(x).strip().upper()
+    m = re.search(r"\bB\d{4}\b", s)
+    return m.group(0) if m else ""
+
+def extract_bcode_from_description(x) -> str:
+    if x is None:
+        return ""
+    s = str(x).upper()
+    m = re.search(r"\bB\d{4}\b", s)
+    return m.group(0) if m else ""
+
+def ledger_bcode_rowwise(row, branchid_col=None, desc_col=None, code_col=None) -> str:
+    if branchid_col and branchid_col in row and pd.notna(row[branchid_col]):
+        b = normalize_branch_from_branchid(row[branchid_col])
+        if b:
+            return b
+
+    if desc_col and desc_col in row and pd.notna(row[desc_col]):
+        b = extract_bcode_from_description(row[desc_col])
+        if b:
+            return b
+
+    if code_col and code_col in row and pd.notna(row[code_col]):
+        b = normalize_ledger_code_strict(row[code_col])
+        if b:
+            return b
+
+    return ""
+
+def build_ledger_maps(cms_ledger_path: str):
+    df = pd.read_excel(cms_ledger_path)
+
+    acc_col = find_col_fuzzy(df, "Account Name")
+    code_col = find_col_fuzzy(df, "code")
+    debit_col = find_col_fuzzy(df, "Debit")
+    credit_col = find_col_fuzzy(df, "Credit")
+    desc_col = find_col_fuzzy(df, "Description")
+    branchid_col = find_col_fuzzy(df, "Branch ID")
+
+    if not acc_col or not code_col or not debit_col or not credit_col:
+        raise ValueError("CMS Ledger: required columns not found (Account Name, code, Debit, Credit).")
+
+    df[acc_col] = df[acc_col].astype(str).str.strip()
+    df["_acc_l"] = df[acc_col].str.lower()
+
+    # remove unwanted accounts (twinline NOT removed now)
+    df = df[~df["_acc_l"].isin(LEDGER_REMOVE_ACCOUNTS)].copy()
+
+    # rename accounts to sheet names
+    df["_sheet"] = df["_acc_l"].map(ACCOUNT_RENAME_MAP).fillna(df[acc_col])
+    df["_sheet"] = df["_sheet"].astype(str).str.strip().str.upper()
+
+    # Net = Debit - Credit
+    df[debit_col] = pd.to_numeric(df[debit_col], errors="coerce").fillna(0)
+    df[credit_col] = pd.to_numeric(df[credit_col], errors="coerce").fillna(0)
+    df["Net"] = df[debit_col] - df[credit_col]
+
+    # ✅ Branch mapping row-wise to avoid "full debit" issues
+    df["_bcode"] = df.apply(
+        lambda r: ledger_bcode_rowwise(r, branchid_col=branchid_col, desc_col=desc_col, code_col=code_col),
+        axis=1
+    )
+    df = df[df["_bcode"] != ""].copy()
+
+    ledger_maps = {}
+    ledger_totals = {}
+
+    for sheet, g in df.groupby("_sheet"):
+        m = g.groupby("_bcode")["Net"].sum().to_dict()
+        ledger_maps[sheet] = {str(k): float(v) for k, v in m.items()}
+        ledger_totals[sheet] = float(sum(m.values()))
+
+    return ledger_maps, ledger_totals
+
+# =========================
+# MAIN
+# =========================
+def run_all_statements_with_ledger(format_file: str, statements_folder: str, ledger_file: str, output_file: str):
+    wb_format = load_workbook(format_file)
+    template_ws = wb_format.worksheets[0]
+    template_data = list(template_ws.values)
+
+    if not template_data or len(template_data) < 2:
+        raise ValueError("Format file first sheet is empty or has no data.")
+
+    static_rows = []
+    for row in template_data[1:]:
+        r = list(row[:4])
+        while len(r) < 4:
+            r.append("")
+        static_rows.append(r)
+
+    ledger_maps, ledger_totals = build_ledger_maps(ledger_file)
+
+    statement_files = list_statement_files(statements_folder)
+    if not statement_files:
+        raise ValueError(f"No statement files found in folder: {statements_folder}")
+
+    wb_out = Workbook()
+    wb_out.remove(wb_out.active)
+
+    # Create Summary first (avoid ws_sum unbound error)
+    ws_sum = wb_out.create_sheet("Summary", 0)
+    ws_sum.append(["Sheet", "File", "Statement Total", "Pasted Statement",
+                   "Ledger Total", "Pasted Ledger", "Difference", "Status", "Remarks/Error"])
+
+    headers = ["Region", "Branch Code", "Branch Name", "Maker", "Statement", "Ledger", "Difference"]
+
+    green_fill = PatternFill("solid", fgColor="C6EFCE")
+    red_fill = PatternFill("solid", fgColor="FFC7CE")
+    yellow_fill = PatternFill("solid", fgColor="FFEB9C")
+
+    summary_rows = []
+
+    for fp in statement_files:
+        sh_name = safe_sheet_name_from_path(fp)
+        ws = wb_out.create_sheet(sh_name)
+        ws.append(headers)
+
+        stmt_map, stmt_total, stmt_err = extract_for_sheet(sh_name, fp)
+
+        ledger_key = sh_name.strip().upper()
+        led_map = ledger_maps.get(ledger_key, {})
+        led_total = ledger_totals.get(ledger_key, 0.0)
+
+        pasted_stmt_total = 0.0
+        pasted_led_total = 0.0
+
+        for r in static_rows:
+            region, bcode, bname, maker = r
+            bcode_norm = normalize_branch_code_generic(bcode)
+
+            stmt_val = float(stmt_map.get(bcode_norm, 0)) if stmt_map else 0.0
+            led_val = float(led_map.get(bcode_norm, 0)) if led_map else 0.0
+            diff = stmt_val - led_val
+
+            pasted_stmt_total += stmt_val
+            pasted_led_total += led_val
+
+            ws.append([region, bcode_norm, bname, maker, stmt_val, led_val, diff])
+
+        apply_formatting(ws, ws.max_row, ws.max_column)
+
+        if not stmt_map:
+            status = "STATEMENT NOT EXTRACTED"
+            remarks = stmt_err
+        else:
+            stmt_ok = abs(stmt_total - pasted_stmt_total) <= 0.01
+            status = "MATCHED" if stmt_ok else "STATEMENT TOTAL NOT MATCHED"
+            remarks = "" if stmt_ok else f"Statement total mismatch: file={stmt_total:.2f}, pasted={pasted_stmt_total:.2f}"
+
+            if led_map:
+                # Optional check: ledger total vs pasted ledger
+                led_ok = abs(led_total - pasted_led_total) <= 0.01
+                if not led_ok:
+                    status += " | LEDGER TOTAL NOT MATCHED"
+                    remarks = (remarks + " | " if remarks else "") + f"Ledger total mismatch: file={led_total:.2f}, pasted={pasted_led_total:.2f}"
+            else:
+                status += " | LEDGER NOT FOUND"
+                remarks = (remarks + " | " if remarks else "") + "Ledger mapping not found for this sheet (Account Name not mapped)."
+
+        summary_rows.append([
+            sh_name,
+            os.path.basename(fp),
+            round(stmt_total, 2),
+            round(pasted_stmt_total, 2),
+            round(led_total, 2),
+            round(pasted_led_total, 2),
+            round(pasted_stmt_total - pasted_led_total, 2),
+            status,
+            remarks
+        ])
+
+    for row in summary_rows:
+        ws_sum.append(row)
+
+    apply_formatting(ws_sum, ws_sum.max_row, ws_sum.max_column)
+
+    # Color rows based on Status column (8th col)
+    for r in range(2, ws_sum.max_row + 1):
+        st = str(ws_sum.cell(r, 8).value).upper()
+        if "MATCHED" in st and "NOT" not in st and "MISMATCH" not in st:
+            fill = green_fill
+        elif "NOT" in st or "MISMATCH" in st:
+            fill = red_fill
+        else:
+            fill = yellow_fill
+        for c in range(1, 10):
+            ws_sum.cell(r, c).fill = fill
+
+    wb_out.save(output_file)
+    print(f"✅ Created Consolidate CMS Recon with TWINLINE: {output_file}")
+
+def run_cms_recon_streamlit(format_file: str, statements_folder: str, cms_ledger_file: str, output_file: str) -> str:
+    """
+    Streamlit wrapper: creates Consolidate CMS Recon.xlsx and returns output path.
+    """
+    run_all_statements_with_ledger(format_file, statements_folder, cms_ledger_file, output_file)
+    return output_file
+
+if __name__ == "__main__":
+    run_all_statements_with_ledger(FORMAT_FILE, STATEMENTS_FOLDER, CMS_LEDGER_FILE, OUTPUT_FILE)
+
 
 
 
