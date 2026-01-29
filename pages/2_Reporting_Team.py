@@ -2520,22 +2520,23 @@ if selected_report == "8) Excess Amount":
         with open(esc_path, "wb") as f:
             f.write(esc.getbuffer())
 
-        if st.button("Run Excess Amount Report"):
-            try:
-                out_file = run_from_streamlit(temp_dir)
+if st.button("Run Excess Amount Automation"):
+    try:
+        out_file = run_excess_amount_from_streamlit(il_path, jlg_path, esc_path, temp_dir)
+        st.success("Generated successfully")
 
-                st.success("Report generated successfully!")
+        with open(out_file, "rb") as f:
+            st.download_button(
+                "⬇️ Download Consolidated Excess Amount",
+                data=f,
+                file_name=os.path.basename(out_file),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+    except Exception as e:
+        st.error("Error occurred. Full details below:")
+        st.exception(e)
 
-                with open(out_file, "rb") as f:
-                    st.download_button(
-                        "⬇️ Download Consolidated Report",
-                        data=f,
-                        file_name=os.path.basename(out_file),
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-            except Exception as e:
-                st.error("Error occurred")
-                st.exception(e)
 if selected_report == "9) CPP Payable":
 
     st.subheader("📑 CPP Payable vs CPP Ledger")
