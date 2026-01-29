@@ -1312,17 +1312,8 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 # =========================
-# PATHS (update if needed)
-# =========================
-FORMAT_FILE = r"C:\Users\01388\Desktop\CMS Recon Sheet.xlsx"
-STATEMENTS_FOLDER = r"C:\Users\01388\Desktop\BS"
-CMS_LEDGER_FILE = r"C:\Users\01388\Desktop\CMS Ledger.xlsx"
-OUTPUT_FILE = r"C:\Users\01388\Desktop\Consolidate CMS Recon.xlsx"
-
-# =========================
 # LEDGER MAPPING RULES
 # =========================
-# NOTE: Twinline is NOT removed now (because we need it for ledger)
 LEDGER_REMOVE_ACCOUNTS = {
     "roi net - c",
     "ease buzz-c",
@@ -1331,14 +1322,14 @@ LEDGER_REMOVE_ACCOUNTS = {
 
 ACCOUNT_RENAME_MAP = {
     "spice money - c": "SPICE",
-    "airtel payments bank - c": "Airtel",
+    "airtel payments bank - c": "AIRTEL",
     "fino payments bank - c": "FINO",
     "fingpay - c": "FINGPAY",
     "axis bbps - c": "BBPS",
     "airpay-c": "AIRPAY",
     "idfc cms": "IDFC",
-    "twinline  - c": "TWINLINE",      # ✅ ADDED
-    "twinline - c": "TWINLINE",       # ✅ ADDED (both spacing variants)
+    "twinline  - c": "TWINLINE",
+    "twinline - c": "TWINLINE",
 }
 
 # =========================
@@ -1351,29 +1342,22 @@ def safe_sheet_name_from_path(path: str) -> str:
     return name[:31] if len(name) > 31 else name
 
 def normalize_branch_code_generic(x) -> str:
-    """
-    Used for STATEMENTS side (branch codes in many formats).
-    Converts to B + 4 digits if any digits found.
-    """
     if x is None:
         return ""
     s = str(x).strip().upper()
     if not s:
         return ""
 
-    # MMF0005 -> B0005
     if "MMF" in s:
         digits = re.sub(r"\D", "", s)
         digits = digits[-4:] if len(digits) >= 4 else digits.zfill(4)
         return "B" + digits.zfill(4)
 
-    # "Branch Code-0501" -> B0501
     if "BRANCH" in s and "-" in s:
         part = s.split("-")[-1]
         digits = re.sub(r"\D", "", part)
         return "B" + digits.zfill(4)
 
-    # "B0494-Jalesar" -> B0494
     m = re.search(r"\bB\d{4}\b", s)
     if m:
         return m.group(0)
@@ -1384,33 +1368,20 @@ def normalize_branch_code_generic(x) -> str:
     return "B" + digits.zfill(4)
 
 def normalize_ledger_code_strict(x) -> str:
-    """
-    ✅ Used ONLY for CMS LEDGER side.
-    Rules:
-      - If code starts with HO (HO001 etc) -> IGNORE (return "")
-      - If code is already Bxxxx -> keep
-      - If code is purely digits (e.g., 471) -> B0471
-      - Otherwise ignore
-    """
     if x is None:
         return ""
     s = str(x).strip().upper()
     if not s:
         return ""
-
     if s.startswith("HO"):
         return ""
-
     if re.fullmatch(r"B\d{4}", s):
         return s
-
     if re.fullmatch(r"\d{1,4}", s):
         return "B" + s.zfill(4)
-
     digits = re.sub(r"\D", "", s)
     if digits and len(digits) <= 4:
         return "B" + digits.zfill(4)
-
     return ""
 
 def apply_formatting(ws, last_row: int, last_col: int):
@@ -1447,7 +1418,8 @@ def apply_formatting(ws, last_row: int, last_col: int):
         ws.column_dimensions[col_letter].width = min(max(10, max_len + 2), 45)
 
 def list_statement_files(folder: str):
-    exts = (".xlsx", ".xls", ".csv")
+    # Streamlit Cloud safe: prefer .xlsx/.csv. .xls often fails due to xlrd not installed.
+    exts = (".xlsx", ".csv", ".xls")
     files = []
     for f in os.listdir(folder):
         if f.lower().endswith(exts):
@@ -1475,37 +1447,23 @@ def build_branch_amount_map(df: pd.DataFrame, branch_col: str, amount_col: str) 
     grp = work.groupby(branch_col, dropna=False)[amount_col].sum()
     return {str(k): float(v) for k, v in grp.items() if str(k).strip()}
 
-# =========================
-# FINO HEADER DETECTION (.xls)
-# =========================
-def _detect_header_row_excel(path: str, engine: str, max_scan_rows: int = 20) -> int:
-    preview = pd.read_excel(path, header=None, engine=engine, nrows=max_scan_rows)
-    required_any = {"status", "amount", "branchid"}
-    for r in range(len(preview)):
-        row_vals = ["" if pd.isna(x) else str(x) for x in preview.iloc[r].tolist()]
-        cleaned = {_clean_colname(x) for x in row_vals}
-        if len(required_any.intersection(cleaned)) >= 2:
-            return r
-    return 2
-
 def read_statement(path: str) -> pd.DataFrame:
     ext = os.path.splitext(path)[1].lower()
+
     if ext == ".csv":
         return pd.read_csv(path)
+
     if ext == ".xlsx":
-        return pd.read_excel(path)
+        return pd.read_excel(path, engine="openpyxl")
+
     if ext == ".xls":
-        engine = "xlrd"
-        header_row = _detect_header_row_excel(path, engine=engine)
-        return pd.read_excel(path, header=header_row, engine=engine)
+        # Cloud-safe: xlrd may not exist. So fail with a clear message.
+        raise ValueError(f".xls file not supported on Streamlit Cloud: {os.path.basename(path)}. Please convert to .xlsx or .csv")
+
     raise ValueError(f"Unsupported file type: {path}")
 
-# =========================
-# GENERIC SUCCESS FILTER
-# =========================
 def _filter_success_generic(df: pd.DataFrame, status_col: str) -> pd.DataFrame:
     s = df[status_col].astype(str).str.strip().str.lower()
-    # keep rows having success and not failed
     ok = s.str.contains("success", na=False) | s.isin(["successful", "success", "transaction successful"])
     bad = s.str.contains("fail", na=False) | s.str.contains("revers", na=False)
     return df[ok & (~bad)].copy()
@@ -1581,9 +1539,7 @@ def extract_for_sheet(sheet_name: str, file_path: str):
             total = pd.to_numeric(df_f[amount_col], errors="coerce").fillna(0).sum()
             return build_branch_amount_map(df_f, branch_col, amount_col), float(total), ""
 
-        # ✅ NEW: TWINLINE extraction (flexible)
         if s == "twinline":
-            # Try to auto-detect columns
             branch_candidates = ["Branch Code", "Branch", "Branch ID", "B CODE", "Code", "Additional Information 2"]
             amount_candidates = ["Amount", "AMOUNT", "Transaction Amount", "Bill Amount", "ORIG_AMNT", "Drop Amount", "Net", "Net Amount"]
             status_candidates = ["Status", "Transaction Status", "Payment Status", "Status Message"]
@@ -1622,7 +1578,7 @@ def extract_for_sheet(sheet_name: str, file_path: str):
         return {}, 0.0, str(e)
 
 # =========================
-# LEDGER: Branch mapping via Branch ID / Description / code
+# LEDGER: Branch mapping
 # =========================
 def normalize_branch_from_branchid(x) -> str:
     if x is None:
@@ -1643,21 +1599,18 @@ def ledger_bcode_rowwise(row, branchid_col=None, desc_col=None, code_col=None) -
         b = normalize_branch_from_branchid(row[branchid_col])
         if b:
             return b
-
     if desc_col and desc_col in row and pd.notna(row[desc_col]):
         b = extract_bcode_from_description(row[desc_col])
         if b:
             return b
-
     if code_col and code_col in row and pd.notna(row[code_col]):
         b = normalize_ledger_code_strict(row[code_col])
         if b:
             return b
-
     return ""
 
 def build_ledger_maps(cms_ledger_path: str):
-    df = pd.read_excel(cms_ledger_path)
+    df = pd.read_excel(cms_ledger_path, engine="openpyxl")
 
     acc_col = find_col_fuzzy(df, "Account Name")
     code_col = find_col_fuzzy(df, "code")
@@ -1672,19 +1625,15 @@ def build_ledger_maps(cms_ledger_path: str):
     df[acc_col] = df[acc_col].astype(str).str.strip()
     df["_acc_l"] = df[acc_col].str.lower()
 
-    # remove unwanted accounts (twinline NOT removed now)
     df = df[~df["_acc_l"].isin(LEDGER_REMOVE_ACCOUNTS)].copy()
 
-    # rename accounts to sheet names
     df["_sheet"] = df["_acc_l"].map(ACCOUNT_RENAME_MAP).fillna(df[acc_col])
     df["_sheet"] = df["_sheet"].astype(str).str.strip().str.upper()
 
-    # Net = Debit - Credit
     df[debit_col] = pd.to_numeric(df[debit_col], errors="coerce").fillna(0)
     df[credit_col] = pd.to_numeric(df[credit_col], errors="coerce").fillna(0)
     df["Net"] = df[debit_col] - df[credit_col]
 
-    # ✅ Branch mapping row-wise to avoid "full debit" issues
     df["_bcode"] = df.apply(
         lambda r: ledger_bcode_rowwise(r, branchid_col=branchid_col, desc_col=desc_col, code_col=code_col),
         axis=1
@@ -1702,7 +1651,7 @@ def build_ledger_maps(cms_ledger_path: str):
     return ledger_maps, ledger_totals
 
 # =========================
-# MAIN
+# MAIN RUNNER
 # =========================
 def run_all_statements_with_ledger(format_file: str, statements_folder: str, ledger_file: str, output_file: str):
     wb_format = load_workbook(format_file)
@@ -1728,13 +1677,11 @@ def run_all_statements_with_ledger(format_file: str, statements_folder: str, led
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
 
-    # Create Summary first (avoid ws_sum unbound error)
     ws_sum = wb_out.create_sheet("Summary", 0)
     ws_sum.append(["Sheet", "File", "Statement Total", "Pasted Statement",
                    "Ledger Total", "Pasted Ledger", "Difference", "Status", "Remarks/Error"])
 
     headers = ["Region", "Branch Code", "Branch Name", "Maker", "Statement", "Ledger", "Difference"]
-
     green_fill = PatternFill("solid", fgColor="C6EFCE")
     red_fill = PatternFill("solid", fgColor="FFC7CE")
     yellow_fill = PatternFill("solid", fgColor="FFEB9C")
@@ -1742,15 +1689,15 @@ def run_all_statements_with_ledger(format_file: str, statements_folder: str, led
     summary_rows = []
 
     for fp in statement_files:
-        sh_name = safe_sheet_name_from_path(fp)
-        ws = wb_out.create_sheet(sh_name)
+        sh_name = safe_sheet_name_from_path(fp).strip().upper()
+
+        ws = wb_out.create_sheet(sh_name[:31])
         ws.append(headers)
 
-        stmt_map, stmt_total, stmt_err = extract_for_sheet(sh_name, fp)
+        stmt_map, stmt_total, stmt_err = extract_for_sheet(sh_name.lower(), fp)
 
-        ledger_key = sh_name.strip().upper()
-        led_map = ledger_maps.get(ledger_key, {})
-        led_total = ledger_totals.get(ledger_key, 0.0)
+        led_map = ledger_maps.get(sh_name, {})
+        led_total = ledger_totals.get(sh_name, 0.0)
 
         pasted_stmt_total = 0.0
         pasted_led_total = 0.0
@@ -1779,7 +1726,6 @@ def run_all_statements_with_ledger(format_file: str, statements_folder: str, led
             remarks = "" if stmt_ok else f"Statement total mismatch: file={stmt_total:.2f}, pasted={pasted_stmt_total:.2f}"
 
             if led_map:
-                # Optional check: ledger total vs pasted ledger
                 led_ok = abs(led_total - pasted_led_total) <= 0.01
                 if not led_ok:
                     status += " | LEDGER TOTAL NOT MATCHED"
@@ -1805,7 +1751,6 @@ def run_all_statements_with_ledger(format_file: str, statements_folder: str, led
 
     apply_formatting(ws_sum, ws_sum.max_row, ws_sum.max_column)
 
-    # Color rows based on Status column (8th col)
     for r in range(2, ws_sum.max_row + 1):
         st = str(ws_sum.cell(r, 8).value).upper()
         if "MATCHED" in st and "NOT" not in st and "MISMATCH" not in st:
@@ -1818,17 +1763,11 @@ def run_all_statements_with_ledger(format_file: str, statements_folder: str, led
             ws_sum.cell(r, c).fill = fill
 
     wb_out.save(output_file)
-    print(f"✅ Created Consolidate CMS Recon with TWINLINE: {output_file}")
-
-def run_cms_recon_streamlit(format_file: str, statements_folder: str, cms_ledger_file: str, output_file: str) -> str:
-    """
-    Streamlit wrapper: creates Consolidate CMS Recon.xlsx and returns output path.
-    """
-    run_all_statements_with_ledger(format_file, statements_folder, cms_ledger_file, output_file)
     return output_file
 
-if __name__ == "__main__":
-    run_all_statements_with_ledger(FORMAT_FILE, STATEMENTS_FOLDER, CMS_LEDGER_FILE, OUTPUT_FILE)
+
+def run_cms_recon_streamlit(format_file: str, statements_folder: str, cms_ledger_file: str, output_file: str) -> str:
+    return run_all_statements_with_ledger(format_file, statements_folder, cms_ledger_file, output_file)
 
 
 # ============================================================
