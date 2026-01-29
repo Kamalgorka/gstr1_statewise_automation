@@ -5,6 +5,10 @@
 # IMPORTANT:
 # - Arrear hub-wise saved as CSV (to avoid MemoryError).
 # - LPC detail sheet is written by pandas (fast, low memory) + Summary formatted by openpyxl.
+def vault_cash_process(file_path: str):
+    # PASTE YOUR Vault_Cash.py LOGIC HERE
+    # It should take file_path, open the excel, do changes, save it back.
+    pass
 
 import os
 import re
@@ -21,9 +25,7 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.utils import get_column_letter
 # Option A (Single file in GitHub): no external imports
 def run_vault_cash_report(file_path: str):
-    # Option A (single file): vault cash logic must exist inside THIS file.
-    # For now, raise clear message instead of NameError.
-    raise Exception("Vault Cash logic not added yet in this single-file. Please paste Vault_Cash.py code into 2_Reporting_Team.py and call it here.")
+    vault_cash_process(file_path)
 
 run_pending_collection_entry = None
 run_demand_verification = None
