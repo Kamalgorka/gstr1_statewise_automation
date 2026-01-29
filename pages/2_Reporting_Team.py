@@ -1518,24 +1518,31 @@ def extract_for_sheet(sheet_name: str, file_path: str):
             return build_branch_amount_map(df_f, branch_col, amount_col), float(total), ""
 
         if s == "fino":
-            # FINO statement: header starts on Excel row 3
-            # (so pandas header=2). We re-read file directly here.
-            df_fino = pd.read_excel(file_path, header=2, engine="openpyxl")
+            # FINO statement header starts from Excel row 3
+            df = pd.read_excel(file_path, header=2, engine="openpyxl")
 
-            status_col = find_col_fuzzy(df_fino, "STATUS")
-            amount_col = find_col_fuzzy(df_fino, "AMOUNT")
-            branch_col = find_col_fuzzy(df_fino, "Employee_ID")  # as per your FINO screenshot
+            status_col = find_col_fuzzy(df, "STATUS")
+            amount_col = find_col_fuzzy(df, "AMOUNT")
+
+            # Branch column can be named in different ways in FINO files
+            branch_col = (
+                find_col_fuzzy(df, "Branch_ID")
+                or find_col_fuzzy(df, "Branch ID")
+                or find_col_fuzzy(df, "BranchId")
+                or find_col_fuzzy(df, "Employee_ID")   # keep as fallback if your file uses this
+            )
 
             if not status_col or not branch_col or not amount_col:
-                return {}, 0.0, f"FINO: columns missing. Found: {list(df_fino.columns)}"
+                return {}, 0.0, f"FINO: columns missing. Found: {list(df.columns)}"
 
-            df_fino[status_col] = df_fino[status_col].astype(str).str.strip().str.lower()
+            df[status_col] = df[status_col].astype(str).str.strip().str.lower()
 
-            # keep success rows
-            df_ok = df_fino[df_fino[status_col].str.contains("success", na=False)].copy()
+            # keep only success rows
+            df_f = df[df[status_col].str.contains("success", na=False)].copy()
 
-            total = pd.to_numeric(df_ok[amount_col], errors="coerce").fillna(0).sum()
-            return build_branch_amount_map(df_ok, branch_col, amount_col), float(total), ""
+            # IMPORTANT: branch values like 573 / 99 will become B0573 / B0099 automatically
+            total = pd.to_numeric(df_f[amount_col], errors="coerce").fillna(0).sum()
+            return build_branch_amount_map(df_f, branch_col, amount_col), float(total), ""
 
         if s == "spice":
             status_col = find_col_fuzzy(df, "Status")
