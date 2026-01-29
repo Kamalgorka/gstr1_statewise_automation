@@ -484,8 +484,196 @@ def run_pending_collection_entry(excel_path):
     wb.save(excel_path)
 
 
+import os
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
+
+SHEET_DVC_UPDATED = "DVC_Updated"
+SHEET_DVC_PIVOT = "DVC_Pivot"
+SHEET_DEMCOL_PIVOT = "DEMCOL_Pivot"
+
+
+def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = [str(c).strip().upper() for c in df.columns]
+    return df
+
+
+def norm_loan_id(x):
+    if pd.isna(x):
+        return ""
+    s = str(x).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
+def insert_due_demand(dvc: pd.DataFrame) -> pd.DataFrame:
+    dvc = clean_columns(dvc)
+
+    required = {"CURRENT_PRINCIPAL_DEMAND", "CURRENT_INTEREST_DEMAND"}
+    missing = required - set(dvc.columns)
+    if missing:
+        raise KeyError(f"DVC missing columns after cleaning: {missing}\nColumns found: {list(dvc.columns)}")
+
+    dvc["CURRENT_PRINCIPAL_DEMAND"] = pd.to_numeric(dvc["CURRENT_PRINCIPAL_DEMAND"], errors="coerce").fillna(0)
+    dvc["CURRENT_INTEREST_DEMAND"] = pd.to_numeric(dvc["CURRENT_INTEREST_DEMAND"], errors="coerce").fillna(0)
+
+    due = dvc["CURRENT_PRINCIPAL_DEMAND"] + dvc["CURRENT_INTEREST_DEMAND"]
+
+    cols = list(dvc.columns)
+    if "DUE DEMAND" in cols:
+        dvc["DUE DEMAND"] = due
+        return dvc
+
+    idx = cols.index("CURRENT_INTEREST_DEMAND") + 1
+    cols = cols[:idx] + ["DUE DEMAND"] + cols[idx:]
+    dvc["DUE DEMAND"] = due
+    return dvc[cols]
+
+
+def pivot_dvc(dvc: pd.DataFrame) -> pd.DataFrame:
+    dvc = clean_columns(dvc)
+
+    if "LOAN_ID" not in dvc.columns:
+        raise KeyError(f"DVC missing column LOAN_ID. Found: {list(dvc.columns)}")
+
+    p = (dvc.pivot_table(index="LOAN_ID", values="DUE DEMAND", aggfunc="sum", fill_value=0)
+         .reset_index()
+         .rename(columns={"DUE DEMAND": "DVC_DUE_DEMAND"}))
+
+    p["LOAN_ID"] = p["LOAN_ID"].apply(norm_loan_id)
+    return p.sort_values("LOAN_ID")
+
+
+def pivot_demcol(dem: pd.DataFrame) -> pd.DataFrame:
+    dem = clean_columns(dem)
+
+    required = {"LOAN_ID", "TOTAL_AMT_DUE"}
+    missing = required - set(dem.columns)
+    if missing:
+        raise KeyError(f"DEMCOL missing columns after cleaning: {missing}\nColumns found: {list(dem.columns)}")
+
+    dem["TOTAL_AMT_DUE"] = pd.to_numeric(dem["TOTAL_AMT_DUE"], errors="coerce").fillna(0)
+
+    p = (dem.pivot_table(index="LOAN_ID", values="TOTAL_AMT_DUE", aggfunc="sum", fill_value=0)
+         .reset_index()
+         .rename(columns={"TOTAL_AMT_DUE": "DEMCOL_TOTAL_AMT_DUE"}))
+
+    p["LOAN_ID"] = p["LOAN_ID"].apply(norm_loan_id)
+    return p.sort_values("LOAN_ID")
+
+
+def write_df(wb, sheet_name: str, df: pd.DataFrame):
+    if sheet_name in wb.sheetnames:
+        wb.remove(wb[sheet_name])
+    ws = wb.create_sheet(sheet_name)
+
+    ws.append(list(df.columns))
+    for row in df.itertuples(index=False):
+        ws.append(list(row))
+
+    for col_idx, col_name in enumerate(df.columns, 1):
+        max_len = len(str(col_name))
+        col_letter = get_column_letter(col_idx)
+        for cell in ws[col_letter]:
+            if cell.value is not None:
+                max_len = max(max_len, len(str(cell.value)))
+        ws.column_dimensions[col_letter].width = min(max_len + 2, 45)
+
+    ws.freeze_panes = "A2"
+
+
+def build_lookup(df: pd.DataFrame, key_col: str, pick_cols: list) -> pd.DataFrame:
+    df = clean_columns(df)
+
+    need = set([key_col] + pick_cols)
+    missing = need - set(df.columns)
+    if missing:
+        raise KeyError(f"Missing in source sheet for lookup: {missing}\nFound: {list(df.columns)}")
+
+    tmp = df[[key_col] + pick_cols].copy()
+    tmp[key_col] = tmp[key_col].apply(norm_loan_id)
+
+    tmp = tmp.drop_duplicates(subset=[key_col], keep="first")
+    return tmp.set_index(key_col)
+
+
+def add_status_columns_for_diff(dvc_compare: pd.DataFrame,
+                                dem_compare: pd.DataFrame,
+                                dvc_raw: pd.DataFrame,
+                                dem_raw: pd.DataFrame):
+
+    dvc_lu = build_lookup(
+        dvc_raw,
+        key_col="LOAN_ID",
+        pick_cols=["STATUS", "PROD_CATEGORY_ID", "LOAN_MATURITY_DATE"]
+    )
+
+    dem_lu = build_lookup(
+        dem_raw,
+        key_col="LOAN_ID",
+        pick_cols=["STATUS", "PRODUCT_ID", "CLOSURE_DATE"]
+    )
+
+    dvc_out = dvc_compare.copy()
+    dvc_out["LOAN_ID"] = dvc_out["LOAN_ID"].apply(norm_loan_id)
+    is_diff = dvc_out["DIFFERENCE (DVC - DEMCOL)"].fillna(0) != 0
+
+    dvc_out["WRITE OFF"] = ""
+    dvc_out["PRODUCT"] = ""
+    dvc_out["MATURED"] = ""
+
+    idxs = dvc_out.loc[is_diff, "LOAN_ID"]
+    dvc_out.loc[is_diff, "WRITE OFF"] = idxs.map(dvc_lu["STATUS"]).fillna("")
+    dvc_out.loc[is_diff, "PRODUCT"] = idxs.map(dvc_lu["PROD_CATEGORY_ID"]).fillna("")
+    dvc_out.loc[is_diff, "MATURED"] = idxs.map(dvc_lu["LOAN_MATURITY_DATE"]).fillna("")
+
+    dem_out = dem_compare.copy()
+    dem_out["LOAN_ID"] = dem_out["LOAN_ID"].apply(norm_loan_id)
+    is_diff2 = dem_out["DIFFERENCE (DEMCOL - DVC)"].fillna(0) != 0
+
+    dem_out["WRITE OFF"] = ""
+    dem_out["PRODUCT"] = ""
+    dem_out["MATURED"] = ""
+
+    idxs2 = dem_out.loc[is_diff2, "LOAN_ID"]
+    dem_out.loc[is_diff2, "WRITE OFF"] = idxs2.map(dem_lu["STATUS"]).fillna("")
+    dem_out.loc[is_diff2, "PRODUCT"] = idxs2.map(dem_lu["PRODUCT_ID"]).fillna("")
+    dem_out.loc[is_diff2, "MATURED"] = idxs2.map(dem_lu["CLOSURE_DATE"]).fillna("")
+
+    return dvc_out, dem_out
+
+
 def run_demand_verification(file_path: str):
-    raise NotImplementedError("Demand Verification logic not pasted yet")
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(file_path)
+
+    dvc = pd.read_excel(file_path, sheet_name="DVC")
+    demcol = pd.read_excel(file_path, sheet_name="DEMCOL")
+
+    dvc_updated = insert_due_demand(dvc)
+
+    dvc_p = pivot_dvc(dvc_updated)
+    dem_p = pivot_demcol(demcol)
+
+    dvc_compare = dvc_p.merge(dem_p, on="LOAN_ID", how="left")
+    dvc_compare["DEMCOL_TOTAL_AMT_DUE"] = dvc_compare["DEMCOL_TOTAL_AMT_DUE"].fillna(0)
+    dvc_compare["DIFFERENCE (DVC - DEMCOL)"] = dvc_compare["DVC_DUE_DEMAND"] - dvc_compare["DEMCOL_TOTAL_AMT_DUE"]
+
+    dem_compare = dem_p.merge(dvc_p, on="LOAN_ID", how="left")
+    dem_compare["DVC_DUE_DEMAND"] = dem_compare["DVC_DUE_DEMAND"].fillna(0)
+    dem_compare["DIFFERENCE (DEMCOL - DVC)"] = dem_compare["DEMCOL_TOTAL_AMT_DUE"] - dem_compare["DVC_DUE_DEMAND"]
+
+    # NEW status columns
+    dvc_compare, dem_compare = add_status_columns_for_diff(dvc_compare, dem_compare, dvc, demcol)
+
+    wb = load_workbook(file_path)
+    write_df(wb, SHEET_DVC_UPDATED, dvc_updated)
+    write_df(wb, SHEET_DVC_PIVOT, dvc_compare)
+    write_df(wb, SHEET_DEMCOL_PIVOT, dem_compare)
+    wb.save(file_path)
+
 
 def run_map_ledger_difference(map_path: str, ledger_path: str):
     raise NotImplementedError("MAP logic not pasted yet")
