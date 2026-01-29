@@ -701,6 +701,13 @@ def is_branch_id(val):
     return bool(re.match(r"^B\d+", s, re.IGNORECASE))
 
 
+# ✅ STREAMLIT CLOUD SAFE: Excel recalculation not available
+def force_excel_recalc_and_save(_path: str):
+    # openpyxl cannot calculate formulas and Streamlit Cloud has no Excel engine.
+    # So we skip recalculation here.
+    return
+
+
 def create_consolidated_sheet(map_file_path):
     """
     Creates/updates 'Consolidated' sheet in MAP.xlsx by taking only rows where:
@@ -710,16 +717,15 @@ def create_consolidated_sheet(map_file_path):
     """
     CONSOL_SHEET = "Consolidated"
 
-    # Ensure formulas (like Balance Amount) are calculated and cached
+    # ✅ skip excel recalculation on cloud
     force_excel_recalc_and_save(map_file_path)
 
     COL_REGION = "A"
     COL_BRANCH = "B"
     COPY_COLS = ["A", "B", "C", "D", "E", "F", "G", "H", "I"]
 
-    # Read calculated values
+    # Read cached/calculated values if present
     wb_val = load_workbook(map_file_path, data_only=True)
-    # Write workbook
     wb = load_workbook(map_file_path)
 
     if CONSOL_SHEET in wb.sheetnames:
@@ -749,22 +755,13 @@ def create_consolidated_sheet(map_file_path):
 
 
 def format_difference_sheet(ws):
-    """
-    Applies:
-    - Sky blue header + bold
-    - Borders on full range
-    - Auto column width
-    - Row height
-    """
     header_fill = PatternFill(start_color="B7DEE8", end_color="B7DEE8", fill_type="solid")
     bold_font = Font(bold=True)
 
-    # Header style
     for cell in ws[1]:
         cell.font = bold_font
         cell.fill = header_fill
 
-    # Borders
     thin = Side(style="thin")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
@@ -775,7 +772,6 @@ def format_difference_sheet(ws):
         for c in range(1, max_col + 1):
             ws.cell(r, c).border = border
 
-    # Auto column width
     for c in range(1, max_col + 1):
         col_letter = get_column_letter(c)
         max_len = 0
@@ -785,11 +781,9 @@ def format_difference_sheet(ws):
                 max_len = max(max_len, len(str(v)))
         ws.column_dimensions[col_letter].width = max_len + 3
 
-    # Row height
     for r in range(1, max_row + 1):
         ws.row_dimensions[r].height = 20
 
-    # Freeze header row
     ws.freeze_panes = "A2"
 
 
@@ -799,7 +793,7 @@ def run_map_ledger_difference(map_file_path, ledger_file_path):
     ESC_SHEET = "Escalation"
     DIFF_SHEET = "Difference"
 
-    # Step 0: Create/Update Consolidated in MAP.xlsx (with Excel recalc)
+    # Step 0: Create/Update Consolidated in MAP.xlsx (NO EXCEL RECALC ON CLOUD)
     create_consolidated_sheet(map_file_path)
 
     # 1) Read MAP Consolidated
@@ -881,16 +875,8 @@ def run_map_ledger_difference(map_file_path, ledger_file_path):
             exec_name = exec_by_branch.get(key, "")
             ws_diff.append([exec_name, key, final_balance, map_balance, diff])
 
-    # Formatting
     format_difference_sheet(ws_diff)
-
     wb.save(ledger_file_path)
-
-
-# Optional local test
-if __name__ == "__main__":
-
-
 
 
 # ============================================================
