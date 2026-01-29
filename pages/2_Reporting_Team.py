@@ -1537,6 +1537,16 @@ def extract_for_sheet(sheet_name: str, file_path: str):
             total = pd.to_numeric(df_ok[amount_col], errors="coerce").fillna(0).sum()
             return build_branch_amount_map(df_ok, branch_col, amount_col), float(total), ""
 
+        if s == "spice":
+            status_col = find_col_fuzzy(df, "Status")
+            amount_col = find_col_fuzzy(df, "Amount")
+            branch_col = find_col_fuzzy(df, "Branch ID")
+            if not status_col or not branch_col or not amount_col:
+                return {}, 0.0, "SPICE: columns missing"
+            df[status_col] = df[status_col].astype(str).str.strip().str.upper()
+            df_f = df[df[status_col] == "SUCCESS"].copy()
+            total = pd.to_numeric(df_f[amount_col], errors="coerce").fillna(0).sum()
+            return build_branch_amount_map(df_f, branch_col, amount_col), float(total), ""
         
         if s == "twinline":
             branch_candidates = ["Branch Code", "Branch", "Branch ID", "B CODE", "Code", "Additional Information 2"]
