@@ -878,6 +878,290 @@ def run_map_ledger_difference(map_file_path, ledger_file_path):
     format_difference_sheet(ws_diff)
     wb.save(ledger_file_path)
 
+import os
+import pandas as pd
+from datetime import datetime
+
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+FOLDER = r"C:\Users\01388\Desktop\Excess"
+
+FILES = [
+    os.path.join(FOLDER, "Repayment Summary IL.xlsx"),
+    os.path.join(FOLDER, "Repayment Summary JLG.xlsx"),
+]
+
+# Escalation mapping file
+ESCALATION_FILE = os.path.join(FOLDER, "Escalation.xlsx")
+ESCALATION_SHEET = "Sheet1"
+
+OUTPUT_SHEET_NAME = "Excess_Amount_Received"
+STAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+CONSOLIDATED_FILE = os.path.join(FOLDER, f"Excess Amount Received - Consolidated_{STAMP}.xlsx")
+CONSOLIDATED_CSV = os.path.join(FOLDER, f"Excess Amount Received - Consolidated_{STAMP}.csv")
+CONSOLIDATED_SHEET = "Consolidated"
+
+
+def norm_col(s: str) -> str:
+    return (
+        str(s).strip().upper()
+        .replace(" ", "")
+        .replace("-", "")
+        .replace(".", "")
+        .replace("\n", "")
+        .replace("\t", "")
+    )
+
+
+def find_col(df, required_name):
+    req = norm_col(required_name)
+    col_map = {norm_col(c): c for c in df.columns}
+    return col_map.get(req)
+
+
+def to_num(series):
+    return pd.to_numeric(series, errors="coerce").fillna(0)
+
+
+def read_sheet_with_status(file_path: str):
+    xl = pd.ExcelFile(file_path, engine="openpyxl")
+    for sh in xl.sheet_names:
+        df = xl.parse(sh)
+        if find_col(df, "Status") is not None:
+            return df, sh
+    df0 = xl.parse(xl.sheet_names[0])
+    return df0, xl.sheet_names[0]
+
+
+def load_escalation_map():
+    esc = pd.read_excel(ESCALATION_FILE, sheet_name=ESCALATION_SHEET, engine="openpyxl")
+
+    col_bc = find_col(esc, "Branch Code")
+    col_maker = find_col(esc, "Maker")
+
+    if col_bc is None or col_maker is None:
+        raise ValueError("Escalation.xlsx must contain 'Branch Code' and 'Maker' columns in Sheet1")
+
+    esc = esc[[col_bc, col_maker]].copy()
+    esc[col_bc] = esc[col_bc].astype(str).str.strip()
+    esc[col_maker] = esc[col_maker].astype(str).str.strip()
+
+    esc = esc[(esc[col_bc] != "") & (esc[col_bc].str.lower() != "nan")]
+
+    return dict(zip(esc[col_bc], esc[col_maker]))
+
+
+def build_required_format(df, escalation_map):
+    col_zone = find_col(df, "zone")
+    col_region = find_col(df, "Region")
+    col_branch_code = find_col(df, "Branch Code")
+    col_branch = find_col(df, "BRANCH_NAME")
+
+    col_loan = find_col(df, "LOAN_ID")
+    col_cust = find_col(df, "CUST_ID")
+    col_date = find_col(df, "COLLECTION_DATE")
+
+    col_amount = find_col(df, "Amount")
+    col_principal = find_col(df, "PRINCIPAL_COLLECTED")
+    col_interest = find_col(df, "INTEREST_COLLECTED")
+
+    col_excess = find_col(df, "Excess Amount") or "Excess Amount"
+
+    missing = []
+    for nm, col in [
+        ("zone", col_zone),
+        ("Region", col_region),
+        ("Branch Code", col_branch_code),
+        ("BRANCH_NAME", col_branch),
+        ("LOAN_ID", col_loan),
+        ("CUST_ID", col_cust),
+        ("COLLECTION_DATE", col_date),
+        ("Amount", col_amount),
+        ("PRINCIPAL_COLLECTED", col_principal),
+        ("INTEREST_COLLECTED", col_interest),
+    ]:
+        if col is None:
+            missing.append(nm)
+    if missing:
+        raise ValueError(f"Missing required columns for final format: {missing}")
+
+    branch_code_series = df[col_branch_code].astype(str).str.strip()
+    executive_series = branch_code_series.map(escalation_map).fillna("")
+
+    out = pd.DataFrame({
+        "Zone": df[col_zone],
+        "Region": df[col_region],
+        "Branch Code": df[col_branch_code],
+        "Branch": df[col_branch],
+        "Executive": executive_series,
+        "Loan_Id": df[col_loan],
+        "Cust_Id": df[col_cust],
+        "Collection_Date": df[col_date],
+        "Amount": df[col_amount],
+        "Principal_Collected": df[col_principal],
+        "Interest_Collected": df[col_interest],
+        "Excess Amount": df[col_excess],
+    })
+
+    return out
+
+
+def process_file(file_path: str, escalation_map):
+    print(f"\n--- Processing: {file_path}")
+
+    df, sheet_used = read_sheet_with_status(file_path)
+    print(f"Sheet used: {sheet_used}")
+
+    col_status = find_col(df, "Status")
+    col_amount = find_col(df, "Amount")
+    col_principal = find_col(df, "PRINCIPAL_COLLECTED")
+    col_interest = find_col(df, "INTEREST_COLLECTED")
+    col_lpc = find_col(df, "Late_Payment_charges")
+
+    missing = []
+    for name, col in [
+        ("Status", col_status),
+        ("Amount", col_amount),
+        ("PRINCIPAL_COLLECTED", col_principal),
+        ("INTEREST_COLLECTED", col_interest),
+        ("Late_Payment_charges", col_lpc),
+    ]:
+        if col is None:
+            missing.append(name)
+    if missing:
+        raise ValueError(f"Missing column(s) in {os.path.basename(file_path)}: {missing}")
+
+    df2 = df[df[col_status].astype(str).str.strip().str.lower() == "processed"].copy()
+
+    df2[col_amount] = to_num(df2[col_amount])
+    df2[col_principal] = to_num(df2[col_principal])
+    df2[col_interest] = to_num(df2[col_interest])
+    df2[col_lpc] = to_num(df2[col_lpc])
+
+    df2["Excess Amount"] = df2[col_amount] - (df2[col_principal] + df2[col_interest])
+
+    df2 = df2[df2["Excess Amount"] >= 1].copy()
+    df2 = df2[df2[col_lpc] <= 0].copy()
+
+    print(f"Final rows after filters: {len(df2)}")
+
+    try:
+        with pd.ExcelWriter(file_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+            df2.to_excel(writer, sheet_name=OUTPUT_SHEET_NAME, index=False)
+        print(f"Saved sheet '{OUTPUT_SHEET_NAME}' in {os.path.basename(file_path)}")
+    except Exception as e:
+        print("⚠ Could not write back into source file (maybe open in Excel).")
+        print("Error:", e)
+
+    return build_required_format(df2, escalation_map)
+
+
+def format_consolidated_excel(xlsx_path: str, sheet_name: str):
+    wb = load_workbook(xlsx_path)
+    ws = wb[sheet_name]
+
+    header_fill = PatternFill(start_color="87CEEB", end_color="87CEEB", fill_type="solid")
+    header_font = Font(bold=True, color="000000")
+    header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    thin = Side(style="thin", color="000000")
+    thin_border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    max_row = ws.max_row
+    max_col = ws.max_column
+
+    ws.freeze_panes = "A2"
+
+    for c in range(1, max_col + 1):
+        cell = ws.cell(row=1, column=c)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_alignment
+        cell.border = thin_border
+
+    data_alignment = Alignment(vertical="center")
+    for r in range(2, max_row + 1):
+        for c in range(1, max_col + 1):
+            cell = ws.cell(row=r, column=c)
+            cell.border = thin_border
+            cell.alignment = data_alignment
+
+    for c in range(1, max_col + 1):
+        col_letter = get_column_letter(c)
+        max_len = 0
+        for r in range(1, max_row + 1):
+            val = ws.cell(row=r, column=c).value
+            if val:
+                max_len = max(max_len, len(str(val)))
+        ws.column_dimensions[col_letter].width = min(max_len + 2, 45)
+
+    wb.save(xlsx_path)
+    wb.close()
+
+
+def main():
+    print("Folder:", FOLDER)
+    print("Files in folder:", os.listdir(FOLDER))
+
+    escalation_map = load_escalation_map()
+    print(f"Escalation mapping loaded: {len(escalation_map)} branch codes")
+
+    all_data = []
+    for f in FILES:
+        try:
+            req_df = process_file(f, escalation_map)
+            all_data.append(req_df)
+        except Exception as e:
+            print(f"❌ Failed for {os.path.basename(f)}")
+            print("Reason:", e)
+
+    if not all_data:
+        print("\n❌ No data produced, consolidated not created.")
+        return
+
+    consolidated = pd.concat(all_data, ignore_index=True)
+    print("\nTotal consolidated rows:", len(consolidated))
+
+    consolidated.to_csv(CONSOLIDATED_CSV, index=False)
+    with pd.ExcelWriter(CONSOLIDATED_FILE, engine="openpyxl", mode="w") as writer:
+        consolidated.to_excel(writer, sheet_name=CONSOLIDATED_SHEET, index=False)
+
+    format_consolidated_excel(CONSOLIDATED_FILE, CONSOLIDATED_SHEET)
+
+    print("\n✅ Consolidated saved:")
+    print(CONSOLIDATED_FILE)
+    print("✅ Backup CSV saved:")
+    print(CONSOLIDATED_CSV)
+def run_from_streamlit(folder_path: str):
+    global FOLDER, FILES, ESCALATION_FILE, CONSOLIDATED_FILE, CONSOLIDATED_CSV
+
+    FOLDER = folder_path
+
+    FILES = [
+        os.path.join(FOLDER, "Repayment Summary IL.xlsx"),
+        os.path.join(FOLDER, "Repayment Summary JLG.xlsx"),
+    ]
+
+    ESCALATION_FILE = os.path.join(FOLDER, "Escalation.xlsx")
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    CONSOLIDATED_FILE = os.path.join(
+        FOLDER, f"Excess Amount Received - Consolidated_{stamp}.xlsx"
+    )
+    CONSOLIDATED_CSV = os.path.join(
+        FOLDER, f"Excess Amount Received - Consolidated_{stamp}.csv"
+    )
+
+    main()   # run your existing logic
+
+    return CONSOLIDATED_FILE
+
+
+if __name__ == "__main__":
+    main()
 
 # ============================================================
 # PAGE UI
