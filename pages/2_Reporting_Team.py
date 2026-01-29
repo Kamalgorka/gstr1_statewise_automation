@@ -1529,15 +1529,24 @@ def extract_for_sheet(sheet_name: str, file_path: str):
             return build_branch_amount_map(df_f, branch_col, amount_col), float(total), ""
 
         if s == "fino":
-            status_col = find_col_fuzzy(df, "Status")
-            amount_col = find_col_fuzzy(df, "AMOUNT")
-            branch_col = find_col_fuzzy(df, "Branch ID")
-            if not status_col or not branch_col or not amount_col:
-                return {}, 0.0, f"FINO: columns missing. Found: {list(df.columns)}"
-            df[status_col] = df[status_col].astype(str).str.strip().str.lower()
-            df_f = df[df[status_col].str.contains("successful", na=False) | df[status_col].str.contains("success", na=False)].copy()
-            total = pd.to_numeric(df_f[amount_col], errors="coerce").fillna(0).sum()
-            return build_branch_amount_map(df_f, branch_col, amount_col), float(total), ""
+    # FINO statement header is on Excel row 3 (0-based header row = 2)
+    df = pd.read_excel(file_path, header=2, engine="openpyxl")
+
+    status_col = find_col_fuzzy(df, "STATUS")
+    amount_col = find_col_fuzzy(df, "AMOUNT")
+    branch_col = find_col_fuzzy(df, "Employee_ID")  # <-- based on your screenshot
+
+    if not status_col or not branch_col or not amount_col:
+        return {}, 0.0, f"FINO: columns missing. Found: {list(df.columns)}"
+
+    df[status_col] = df[status_col].astype(str).str.strip().str.lower()
+
+    # keep success rows
+    df_f = df[df[status_col].str.contains("success", na=False)].copy()
+
+    total = pd.to_numeric(df_f[amount_col], errors="coerce").fillna(0).sum()
+    return build_branch_amount_map(df_f, branch_col, amount_col), float(total), ""
+
 
         if s == "twinline":
             branch_candidates = ["Branch Code", "Branch", "Branch ID", "B CODE", "Code", "Additional Information 2"]
