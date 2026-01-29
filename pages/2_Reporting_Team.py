@@ -1107,6 +1107,247 @@ def run_excess_amount_from_streamlit(il_path: str, jlg_path: str, escalation_pat
 
     return consolidated_file
 
+import re
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
+
+TOL = 0.000001
+
+
+def to_num(x):
+    try:
+        if x is None or x == "":
+            return 0.0
+        return float(x)
+    except:
+        return 0.0
+
+
+def norm(s):
+    return str(s).strip().lower() if s is not None else ""
+
+
+def is_branch_id(val):
+    s = str(val).strip() if val is not None else ""
+    return bool(re.match(r"^B\d+", s, re.IGNORECASE))
+
+
+def force_excel_recalc_and_save(path):
+    """
+    Forces Excel to recalc formulas and save cached values.
+    REQUIRED because openpyxl does not calculate Excel formulas.
+    """
+    import xlwings as xw
+
+    app = xw.App(visible=False)
+    app.display_alerts = False
+    app.screen_updating = False
+    try:
+        wb = app.books.open(path)
+        app.calculate()
+        wb.save()
+        wb.close()
+    finally:
+        app.quit()
+
+
+def create_consolidated_sheet_cpp_payable(cpp_payable_file_path):
+    """
+    Creates/updates 'Consolidated' sheet in CPP Payable file (same logic as MAP):
+      - Column A = 'Closing Balance'
+      - Column B starts with 'B' (Branch ID)
+    Copies columns A to I
+    """
+    CONSOL_SHEET = "Consolidated"
+
+    # Ensure formulas (like Balance Amount) are calculated and cached
+    force_excel_recalc_and_save(cpp_payable_file_path)
+
+    COL_REGION = "A"
+    COL_BRANCH = "B"
+    COPY_COLS = ["A", "B", "C", "D", "E", "F", "G", "H", "I"]
+
+    # Read calculated values
+    wb_val = load_workbook(cpp_payable_file_path, data_only=True)
+    # Write workbook
+    wb = load_workbook(cpp_payable_file_path)
+
+    if CONSOL_SHEET in wb.sheetnames:
+        del wb[CONSOL_SHEET]
+
+    ws_out = wb.create_sheet(CONSOL_SHEET, 0)
+    ws_out.append(["Source Sheet"] + COPY_COLS)
+
+    for sh in wb.sheetnames:
+        if sh == CONSOL_SHEET:
+            continue
+
+        ws = wb[sh]
+        ws_v = wb_val[sh]
+
+        for r in range(1, ws.max_row + 1):
+            region_val = ws[f"{COL_REGION}{r}"].value
+            branch_val = ws[f"{COL_BRANCH}{r}"].value
+
+            if norm(region_val) == "closing balance" and is_branch_id(branch_val):
+                row_data = [sh]
+                for col in COPY_COLS:
+                    row_data.append(ws_v[f"{col}{r}"].value)
+                ws_out.append(row_data)
+
+    wb.save(cpp_payable_file_path)
+
+
+def format_difference_sheet(ws):
+    """
+    Applies:
+    - Sky blue header + bold
+    - Borders on full range
+    - Auto column width
+    - Row height
+    - Freeze header row
+    """
+    header_fill = PatternFill(start_color="B7DEE8", end_color="B7DEE8", fill_type="solid")
+    bold_font = Font(bold=True)
+
+    for cell in ws[1]:
+        cell.font = bold_font
+        cell.fill = header_fill
+
+    thin = Side(style="thin")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    max_row = ws.max_row
+    max_col = ws.max_column
+
+    for r in range(1, max_row + 1):
+        for c in range(1, max_col + 1):
+            ws.cell(r, c).border = border
+
+    for c in range(1, max_col + 1):
+        col_letter = get_column_letter(c)
+        max_len = 0
+        for r in range(1, max_row + 1):
+            v = ws.cell(r, c).value
+            if v is not None:
+                max_len = max(max_len, len(str(v)))
+        ws.column_dimensions[col_letter].width = max_len + 3
+
+    for r in range(1, max_row + 1):
+        ws.row_dimensions[r].height = 20
+
+    ws.freeze_panes = "A2"
+
+
+def run_cpp_payable_vs_cpp_ledger_difference(cpp_payable_file_path, cpp_ledger_file_path):
+    """
+    Same logic as MAP vs MAP Ledger:
+    - Create/Update Consolidated in CPP Payable file
+    - Compare with CPP Ledger file (Ledger + Escalation sheets)
+    - Create Difference sheet in CPP Ledger file
+    """
+    CONSOL_SHEET = "Consolidated"
+    LEDGER_SHEET = "Ledger"
+    ESC_SHEET = "Escalation"
+    DIFF_SHEET = "Difference"
+
+    # Step 0: Create/Update Consolidated in CPP Payable file
+    create_consolidated_sheet_cpp_payable(cpp_payable_file_path)
+
+    # 1) Read CPP Payable Consolidated
+    df_payable = pd.read_excel(cpp_payable_file_path, sheet_name=CONSOL_SHEET, engine="openpyxl")
+    branch_col = "B"
+    balance_col = "I"
+
+    df_payable[branch_col] = df_payable[branch_col].astype(str).str.strip()
+    df_payable[balance_col] = pd.to_numeric(df_payable[balance_col], errors="coerce").fillna(0)
+    payable_balance_by_branch = df_payable.set_index(branch_col)[balance_col].to_dict()
+
+    # 2) Open CPP Ledger workbook
+    wb = load_workbook(cpp_ledger_file_path)
+    ws_ledger = wb[LEDGER_SHEET]
+    ws_esc = wb[ESC_SHEET]
+
+    # 3) Escalation mapping Branch Code -> Maker (Executive Name)
+    esc_headers = {}
+    for c in range(1, ws_esc.max_column + 1):
+        h = ws_esc.cell(1, c).value
+        if h:
+            esc_headers[norm(h)] = c
+
+    col_branch_code = esc_headers.get("branch code")
+    col_maker = esc_headers.get("maker")
+    if not col_branch_code or not col_maker:
+        raise Exception("Escalation sheet must have headers: 'Branch Code' and 'Maker' in row 1")
+
+    exec_by_branch = {}
+    for r in range(2, ws_esc.max_row + 1):
+        bc = ws_esc.cell(r, col_branch_code).value
+        mk = ws_esc.cell(r, col_maker).value
+        if bc is None:
+            continue
+        exec_by_branch[str(bc).strip()] = "" if mk is None else str(mk).strip()
+
+    # 4) Ledger columns
+    ledger_headers = {}
+    for c in range(1, ws_ledger.max_column + 1):
+        h = ws_ledger.cell(1, c).value
+        if h:
+            ledger_headers[norm(h)] = c
+
+    sub_acc_col = ledger_headers.get("sub account")
+    debit_col = ledger_headers.get("closing debit")
+    credit_col = ledger_headers.get("closing credit")
+    if not (sub_acc_col and debit_col and credit_col):
+        raise Exception("Ledger sheet must have headers: 'Sub Account', 'Closing Debit', 'Closing Credit' in row 1")
+
+    # 5) Create/Replace Difference sheet
+    if DIFF_SHEET in wb.sheetnames:
+        del wb[DIFF_SHEET]
+    ws_diff = wb.create_sheet(DIFF_SHEET)
+
+    ws_diff.append([
+        "Executive Name",
+        "Branch Code",
+        "Ledger Balance (Cl.Credit-Cl.Debit)",
+        "CPP Payable Sheet Balance",
+        "Difference"
+    ])
+
+    # 6) Only difference rows
+    for r in range(2, ws_ledger.max_row + 1):
+        sub_acc = ws_ledger.cell(r, sub_acc_col).value
+        if sub_acc is None or str(sub_acc).strip() == "":
+            continue
+
+        key = str(sub_acc).strip()
+
+        closing_credit = to_num(ws_ledger.cell(r, credit_col).value)
+        closing_debit = to_num(ws_ledger.cell(r, debit_col).value)
+        final_balance = closing_credit - closing_debit
+
+        payable_balance = to_num(payable_balance_by_branch.get(key, 0))
+        diff = final_balance - payable_balance
+
+        if abs(diff) > TOL:
+            exec_name = exec_by_branch.get(key, "")
+            ws_diff.append([exec_name, key, final_balance, payable_balance, diff])
+
+    # Formatting
+    format_difference_sheet(ws_diff)
+
+    wb.save(cpp_ledger_file_path)
+
+
+# Optional local test
+if __name__ == "__main__":
+    # Update file paths as per your system
+    CPP_PAYABLE_FILE = r"C:\Users\01388\Desktop\CPP Payable.xlsx"
+    CPP_LEDGER_FILE = r"C:\Users\01388\Desktop\CPP Ledger.xlsx"
+
+    run_cpp_payable_vs_cpp_ledger_difference(CPP_PAYABLE_FILE, CPP_LEDGER_FILE)
 
 # ============================================================
 # PAGE UI
