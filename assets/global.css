@@ -1,1 +1,333 @@
+st.markdown("""
+<style>
+/* --- TAB BUTTON STYLE (Compact + Bright Orange) --- */
 
+/* Tab container */
+.stTabs [data-baseweb="tab-list"]{
+    gap: 4px;
+    border-bottom: none !important;
+    padding-bottom: 4px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+}
+
+/* Each tab */
+.stTabs [data-baseweb="tab"]{
+    background: #2b2b2b !important;          /* dark grey */
+    border: 1px solid #ffffff !important;    /* white outline */
+    border-radius: 4px !important;
+    padding: 3px 6px !important;             /* smaller width */
+    color: #ffffff !important;
+    min-height: 26px !important;
+}
+
+/* Tab text */
+.stTabs [data-baseweb="tab"] p{
+    font-size: 11px !important;
+    font-weight: 600 !important;
+    margin: 0 !important;
+    white-space: nowrap;
+}
+
+/* Active tab – Bright Orange */
+.stTabs [aria-selected="true"]{
+    background: #ff6a00 !important;          /* sharp bright orange */
+    border: 1px solid #ff6a00 !important;
+    color: #ffffff !important;
+}
+
+/* Remove default underline */
+.stTabs [data-baseweb="tab-highlight"],
+.stTabs [data-baseweb="tab-border"]{
+    display: none !important;
+}
+
+/* ---------------- File Uploader Button Styling ---------------- */
+
+div[data-testid="stFileUploader"] button{
+    background-color: #ff6a00 !important;    /* same bright orange */
+    color: white !important;
+    border-radius: 6px !important;
+    border: none !important;
+    padding: 5px 12px !important;            /* compact button */
+    font-weight: 600 !important;
+}
+
+div[data-testid="stFileUploader"] button:hover{
+    background-color: #e65c00 !important;
+}
+
+/* ============================================================
+   NEW: Make Upload Boxes Smaller (Height + Padding) everywhere
+   ============================================================ */
+
+/* Orange label line: "Upload ....xlsx" */
+div[data-testid="stFileUploader"] label{
+    color: #ff6a00 !important;               /* same as Browse button */
+    font-weight: 700 !important;
+    font-size: 13px !important;
+}
+
+/* Reduce uploader drop-zone height + padding */
+div[data-testid="stFileUploader"] section{
+    padding: 8px 10px !important;            /* smaller padding */
+    min-height: 52px !important;             /* reduce height */
+    border-radius: 10px !important;
+}
+
+/* Make inner content compact */
+div[data-testid="stFileUploader"] section *{
+    line-height: 1.15 !important;
+}
+
+/* "Drag and drop..." and helper text smaller */
+div[data-testid="stFileUploader"] section small{
+    font-size: 10px !important;
+}
+
+/* Uploaded file row compact */
+div[data-testid="stFileUploader"] ul{
+    margin-top: 4px !important;
+}
+div[data-testid="stFileUploader"] li{
+    padding: 4px 8px !important;
+    font-size: 11px !important;
+    border-radius: 8px !important;
+}
+
+/* Optional: make browse button slightly smaller too */
+div[data-testid="stFileUploader"] button{
+    padding: 4px 10px !important;
+    font-size: 13px !important;
+}
+/* ===== Force ultra-compact upload box ===== */
+
+/* Outer wrapper */
+div[data-testid="stFileUploader"]{
+    margin-bottom: 6px !important;
+}
+
+/* Drop zone main area */
+div[data-testid="stFileUploader"] section{
+    min-height: 38px !important;     /* hard reduce height */
+    padding: 6px 8px !important;     /* tight padding */
+}
+
+/* Icon + text row */
+div[data-testid="stFileUploader"] section > div{
+    gap: 6px !important;
+}
+
+/* Cloud icon size */
+div[data-testid="stFileUploader"] svg{
+    width: 20px !important;
+    height: 20px !important;
+}
+
+/* Main text: "Drag and drop file here" */
+div[data-testid="stFileUploader"] section strong,
+div[data-testid="stFileUploader"] section span{
+    font-size: 12px !important;
+    line-height: 1.1 !important;
+}
+
+/* Helper text: "Limit 200MB..." */
+div[data-testid="stFileUploader"] section small{
+    font-size: 9px !important;
+    margin-top: 0 !important;
+    line-height: 1 !important;
+}
+
+/* Uploaded file row */
+div[data-testid="stFileUploader"] li{
+    padding: 3px 6px !important;
+    font-size: 10px !important;
+}
+/* ===== HARD REDUCE uploader box HEIGHT (not only text) ===== */
+
+/* Main drop area */
+div[data-testid="stFileUploader"] section{
+    padding: 4px 8px !important;
+    min-height: 34px !important;
+    height: 44px !important;          /* force actual height */
+    display: flex !important;
+    align-items: center !important;
+}
+
+/* Inner wrapper */
+div[data-testid="stFileUploader"] section > div{
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+}
+
+/* The clickable dropzone block */
+div[data-testid="stFileUploader"] section div[role="button"]{
+    padding: 0 !important;
+    margin: 0 !important;
+    min-height: 34px !important;
+    height: 44px !important;          /* force height */
+    display: flex !important;
+    align-items: center !important;
+}
+
+/* Reduce left icon spacing */
+div[data-testid="stFileUploader"] section svg{
+    width: 18px !important;
+    height: 18px !important;
+    margin-right: 6px !important;
+}
+/* ===== Compact Browse Files button container ===== */
+
+/* Reduce the height of the button wrapper */
+div[data-testid="stFileUploader"] section div[role="button"] > div:last-child{
+    padding: 0 !important;
+    margin: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+}
+
+/* Make the Browse button slimmer */
+div[data-testid="stFileUploader"] button{
+    padding: 3px 10px !important;   /* smaller height */
+    font-size: 12px !important;
+    line-height: 1.1 !important;
+    border-radius: 5px !important;
+}
+/* ========= Report Dropdown Styling ========= */
+div[data-testid="stSelectbox"] label{
+    color: #ff6a00 !important;
+    font-weight: 800 !important;
+    font-size: 14px !important;
+}
+
+div[data-testid="stSelectbox"] div[role="combobox"]{
+    background: #2b2b2b !important;
+    border: 1px solid #ffffff !important;
+    border-radius: 8px !important;
+    padding: 6px 10px !important;
+    min-height: 42px !important;
+    color: #ffffff !important;
+}
+
+div[data-testid="stSelectbox"] div[role="combobox"]:focus-within{
+    border: 1px solid #ff6a00 !important;
+    box-shadow: 0 0 0 2px rgba(255,106,0,0.35) !important;
+}
+/* ===== Selectbox (Report Dropdown) – Match Browse Button Color ===== */
+
+/* Main selectbox container */
+div[data-baseweb="select"] > div {
+    background-color: #ff6a00 !important;
+    border: 1px solid #ff6a00 !important;
+    color: white !important;
+}
+
+/* Text inside selectbox */
+div[data-baseweb="select"] span {
+    color: white !important;
+    font-weight: 600 !important;
+}
+
+/* Dropdown arrow */
+div[data-baseweb="select"] svg {
+    fill: white !important;
+}
+
+/* Dropdown menu items */
+ul[role="listbox"] {
+    background-color: #1f1f1f !important;
+}
+
+/* Hovered option */
+ul[role="listbox"] li:hover {
+    background-color: #ff6a00 !important;
+    color: white !important;
+}
+
+/* Selected option */
+ul[role="listbox"] li[aria-selected="true"] {
+    background-color: #ff6a00 !important;
+    color: white !important;
+}
+/* Reduce width of report dropdown (search bar) */
+div[data-testid="stSelectbox"]{
+    max-width: 50% !important;   /* half width */
+}
+/* =============== FILE UPLOADER COMPACT =============== */
+div[data-testid="stFileUploader"] section{
+  padding: 6px 10px !important;
+}
+div[data-testid="stFileUploader"] section > div{
+  gap: 6px !important;
+}
+
+/* reduce the drag-drop box height */
+div[data-testid="stFileUploaderDropzone"]{
+  padding: 8px 10px !important;
+  min-height: 56px !important;
+}
+
+/* reduce inner text size */
+div[data-testid="stFileUploaderDropzone"] *{
+  font-size: 0.90rem !important;
+}
+
+/* reduce Browse files button height */
+div[data-testid="stFileUploader"] button{
+  padding: 6px 12px !important;
+  min-height: 34px !important;
+  height: 34px !important;
+}
+/* =============== SIDEBAR WIDTH =============== */
+section[data-testid="stSidebar"]{
+  width: 230px !important;          /* change 230 -> 200/260 as you like */
+}
+section[data-testid="stSidebar"] > div{
+  width: 230px !important;
+}
+div[data-testid="stSidebarCollapsedControl"]{
+  left: 230px !important;
+}
+
+/* =============== PAGE TOP SPACE / HEADER SIZE =============== */
+.main .block-container{
+  padding-top: 1.2rem !important;   /* reduce top empty space */
+  padding-bottom: 2rem !important;
+  max-width: 1200px;                /* optional: avoid too wide */
+}
+
+/* Reduce big title size */
+h1{
+  font-size: 2.0rem !important;     /* reduce headline */
+  margin-bottom: 0.4rem !important;
+}
+
+/* If you have a big subtitle / markdown under title */
+.small-subtitle{
+  margin-top: -6px !important;
+  margin-bottom: 8px !important;
+  font-size: 0.95rem !important;
+  opacity: 0.85;
+}
+/* Hide the default "streamlit app" label */
+section[data-testid="stSidebar"] .stMarkdown:first-child {
+    display: none;
+}
+/* 1) Hide the default "streamlit app" pill/header */
+section[data-testid="stSidebar"] [data-testid="stSidebarNav"] > div:first-child {
+    display: none !important;
+}
+
+/* 2) Add custom heading "Teams" */
+section[data-testid="stSidebar"] [data-testid="stSidebarNav"]::before {
+    content: "Teams";
+    display: block;
+    padding: 12px 12px 8px 12px;
+    font-size: 22px;   /* bigger than HO Team */
+    font-weight: 800;
+    color: #111827;
+}
+
+</style>
+""", unsafe_allow_html=True)
