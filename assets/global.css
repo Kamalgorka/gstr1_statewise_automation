@@ -330,4 +330,3 @@ section[data-testid="stSidebar"] [data-testid="stSidebarNav"]::before {
 }
 
 </style>
-""", unsafe_allow_html=True)
