@@ -10,6 +10,10 @@ import time
 from datetime import datetime
 from openpyxl.styles import Font, Alignment
 
+import streamlit as st
+from ui import load_global_css
+
+load_global_css()
 
 warnings.filterwarnings("ignore", category=UserWarning)
 st.set_page_config(
