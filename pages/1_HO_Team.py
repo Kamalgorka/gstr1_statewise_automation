@@ -942,6 +942,8 @@ st.markdown("""
 st.markdown('<div class="big-title">📌 HO Team Automations</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">GSTR-1 + HO Day Book</div>', unsafe_allow_html=True)
 st.markdown("<br>", unsafe_allow_html=True)
+tab1, tab2 = st.tabs(["📑 GSTR-1 State-wise", "🏦 HO Day Book"])
+with tab1:
 
 # ================= GST SECTION =================
 st.markdown("## 📑 GSTR-1 State-wise Automation")
@@ -1041,6 +1043,9 @@ if st.button("🚀 Generate State-wise Excel Files", use_container_width=True, k
 
     with open(zip_path, "rb") as z:
         st.download_button("⬇ Download GSTR1 ZIP", z, file_name=f"GSTR1_{MONTH}.zip", key="dl_zip", use_container_width=True)
+with tab2:
+    st.markdown("## 🏦 HO Day Book Automation")
+    # ✅ paste your existing Day Book UI code here (upload COA + upload ZIP + run + download)
 
 # ================= DAY BOOK SECTION =================
 st.markdown("---")
