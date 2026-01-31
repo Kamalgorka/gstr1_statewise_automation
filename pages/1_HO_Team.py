@@ -8,20 +8,24 @@ import re
 import shutil
 import time
 from datetime import datetime
-from openpyxl.styles import Font, Alignment
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.worksheet.table import Table, TableStyleInfo
+import tempfile
 
-import streamlit as st
 from ui import load_global_css
 
 load_global_css()
 
 warnings.filterwarnings("ignore", category=UserWarning)
 st.set_page_config(
-    page_title="GSTR-1 State-wise Automation",
+    page_title="HO Team Automations",
     page_icon="📊",
     layout="wide"
 )
 
+# ======================================================
+# =================== ✅ GST CONFIG =====================
+# ======================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 UPLOAD_FOLDER = os.path.join("/tmp", "uploads")
@@ -142,9 +146,6 @@ def extract_last_num(x):
     return int(nums[-1]) if nums else 0
 
 
-# ======================================================
-# ✅ 1) FILE VALIDATION (Sheets + Key Columns)
-# ======================================================
 REQUIRED_SHEETS = [
     "GSTR1", "B2B", "CD Note Reg", "DN Note Reg", "Exempt Income",
     "B2C PF", "CD Note Unreg", "B2C Onboarding"
@@ -157,7 +158,6 @@ REQUIRED_COLUMNS = {
     "B2C PF": ["State", "Month", "LPF"],
     "CD Note Unreg": ["State", "Month"],
     "Exempt Income": ["Row Labels", "Sum of Collection Intrest", "Month"],
-    # "GSTR1" and "B2C Onboarding" kept open because formats vary
 }
 
 
@@ -175,11 +175,9 @@ def validate_excel(file_path: str):
     if missing_sheets:
         errors.append("❌ Missing required sheet(s): " + ", ".join(missing_sheets))
 
-    # If mandatory sheets missing, stop further checks
     if errors:
         return errors, warnings_list
 
-    # Column checks (lightweight: read only headers)
     for sh, cols in REQUIRED_COLUMNS.items():
         try:
             df_head = pd.read_excel(file_path, sheet_name=sh, nrows=1)
@@ -189,8 +187,6 @@ def validate_excel(file_path: str):
         except Exception as e:
             errors.append(f"❌ Could not read sheet '{sh}'. Error: {e}")
 
-    # Extra practical warnings
-    # Check State values exist in B2B
     try:
         df_states = pd.read_excel(file_path, sheet_name="B2B", usecols=["State"])
         if df_states["State"].dropna().empty:
@@ -201,12 +197,8 @@ def validate_excel(file_path: str):
     return errors, warnings_list
 
 
-# ======================================================
-# ✅ 2) CACHING FOR READING ALL SHEETS
-# ======================================================
 @st.cache_data(show_spinner=False)
 def read_all_sheets_cached(file_bytes: bytes):
-    # Use BytesIO so cache is based on file content
     from io import BytesIO
     bio = BytesIO(file_bytes)
 
@@ -226,7 +218,6 @@ def read_all_sheets_cached(file_bytes: bytes):
     bio.seek(0)
     df_b2c_onboard = pd.read_excel(bio, sheet_name="B2C Onboarding")
 
-    # normalize once
     if "Month" in df_b2c_pf.columns:
         df_b2c_pf["Month_norm"] = df_b2c_pf["Month"].astype(str).str.lower().str.strip()
     else:
@@ -235,9 +226,6 @@ def read_all_sheets_cached(file_bytes: bytes):
     return df_gstr1, df_b2b, df_cd, df_dn, df_exempt, df_b2c_pf, df_cdunreg, df_b2c_onboard
 
 
-# ======================================================
-# ✅ 3) PROGRESS BAR + ETA (per state)
-# ======================================================
 def run_gstr_process(
     df_gstr1, df_b2b, df_cd, df_dn, df_exempt,
     df_b2c_pf, df_cdunreg, df_b2c_onboard,
@@ -251,8 +239,6 @@ def run_gstr_process(
     start_all = time.time()
 
     for i, state in enumerate(STATE_LIST, start=1):
-        state_start = time.time()
-
         wb = load_workbook(TEMPLATE_FILE)
 
         for sheet_name in wb.sheetnames:
@@ -264,7 +250,6 @@ def run_gstr_process(
         df_cd_state = filter_state_month(df_cd, state, MONTH)
         df_dn_state = filter_state_month(df_dn, state, MONTH)
 
-        # B2B
         ws = wb["b2b"]
         r = 4
         for _, row in df_state_b2b.iterrows():
@@ -284,7 +269,6 @@ def run_gstr_process(
                 ws[f"M{r}"] = ""
                 r += 1
 
-        # B2CL
         ws = wb["b2cl"]
         r = 4
         for _, row in df_state_b2b.iterrows():
@@ -300,7 +284,6 @@ def run_gstr_process(
                 ws[f"I{r}"] = ""
                 r += 1
 
-        # B2CS
         ws = wb["b2cs"]
         r = 4
 
@@ -355,7 +338,6 @@ def run_gstr_process(
                 ws[f"H{r}"] = ""
                 r += 1
 
-        # CDNR
         ws = wb["cdnr"]
         r = 4
         notes_df = pd.concat([df_cd_state, df_dn_state], ignore_index=True)
@@ -391,7 +373,6 @@ def run_gstr_process(
             ws[f"M{r}"] = ""
             r += 1
 
-        # EXEMPT
         ws = wb["exemp"]
         exempt_val = None
         if "Row Labels" in df_exempt.columns and "Sum of Collection Intrest" in df_exempt.columns:
@@ -409,386 +390,545 @@ def run_gstr_process(
         for col in ["B", "C", "D"]:
             for row_idx in range(4, 8):
                 ws[f"{col}{row_idx}"] = ""
-
         ws["C7"] = float(exempt_val) if (exempt_val and not pd.isna(exempt_val) and exempt_val != 0) else ""
-
-        # HSN (b2b)
-        ws = wb["hsn (b2b)"]
-        r = 4
-        df_state_hsn = df_state_b2b[df_state_b2b["Invoice Type"].astype(str).str.upper() == "B2B"][[
-            "HSN or SAC Code", "Total Transaction Value", "Item Taxable Value",
-            "IGST Amount", "CGST Amount", "SGST Amount"
-        ]].copy() if not df_state_b2b.empty else pd.DataFrame(columns=[
-            "HSN or SAC Code", "Total Transaction Value", "Item Taxable Value",
-            "IGST Amount", "CGST Amount", "SGST Amount"
-        ])
-
-        if not df_state_hsn.empty:
-            df_state_hsn["HSN"] = df_state_hsn["HSN or SAC Code"].astype(str).apply(clean_hsn)
-
-            df_hsn_b2b_grp = df_state_hsn.groupby("HSN", as_index=False)[[
-                "Total Transaction Value", "Item Taxable Value",
-                "IGST Amount", "CGST Amount", "SGST Amount"
-            ]].sum()
-        else:
-            df_hsn_b2b_grp = pd.DataFrame(columns=[
-                "HSN", "Total Transaction Value", "Item Taxable Value",
-                "IGST Amount", "CGST Amount", "SGST Amount"
-            ])
-
-        df_cdreg_state = df_cd[
-            (df_cd["State"].astype(str).str.upper() == state) &
-            (df_cd["Month"].astype(str).str.lower().str.contains(MONTH_NORM, na=False))
-        ].copy()
-
-        if not df_cdreg_state.empty and "HSN or SAC Code" in df_cdreg_state.columns:
-            df_cdreg_state["HSN"] = df_cdreg_state["HSN or SAC Code"].apply(clean_hsn)
-            df_cdreg_state = df_cdreg_state.rename(columns={
-                "Total Transaction Value": "cd_total",
-                "Item Taxable Value": "cd_taxable",
-                "IGST Amount": "cd_igst",
-                "CGST Amount": "cd_cgst",
-                "SGST Amount": "cd_sgst"
-            })
-            cd_group = df_cdreg_state.groupby("HSN", as_index=False)[[
-                "cd_total", "cd_taxable", "cd_igst", "cd_cgst", "cd_sgst"
-            ]].sum()
-        else:
-            cd_group = pd.DataFrame(columns=["HSN", "cd_total", "cd_taxable", "cd_igst", "cd_cgst", "cd_sgst"])
-
-        df_final_hsn = df_hsn_b2b_grp.merge(cd_group, on="HSN", how="left").fillna(0) if not df_hsn_b2b_grp.empty else pd.DataFrame(columns=[
-            "HSN", "Total Transaction Value", "Item Taxable Value", "IGST Amount", "CGST Amount", "SGST Amount",
-            "cd_total", "cd_taxable", "cd_igst", "cd_cgst", "cd_sgst"
-        ])
-
-        if not df_final_hsn.empty:
-            df_final_hsn["Total Transaction Value"] -= df_final_hsn["cd_total"]
-            df_final_hsn["Item Taxable Value"] -= df_final_hsn["cd_taxable"]
-            df_final_hsn["IGST Amount"] -= df_final_hsn["cd_igst"]
-            df_final_hsn["CGST Amount"] -= df_final_hsn["cd_cgst"]
-            df_final_hsn["SGST Amount"] -= df_final_hsn["cd_sgst"]
-
-            df_final_hsn[[
-                "Total Transaction Value", "Item Taxable Value",
-                "IGST Amount", "CGST Amount", "SGST Amount"
-            ]] = df_final_hsn[[
-                "Total Transaction Value", "Item Taxable Value",
-                "IGST Amount", "CGST Amount", "SGST Amount"
-            ]].clip(lower=0)
-
-            for _, row in df_final_hsn.iterrows():
-                ws[f"A{r}"] = row["HSN"]
-                ws[f"E{r}"] = row["Total Transaction Value"]
-                ws[f"F{r}"] = row["Item Taxable Value"]
-                ws[f"G{r}"] = 18
-                ws[f"H{r}"] = row["IGST Amount"]
-                ws[f"I{r}"] = row["CGST Amount"]
-                ws[f"J{r}"] = row["SGST Amount"]
-                r += 1
-
-        # ======================================================
-        # ✅ HSN (B2C) – FULL BLOCK (WITH EXEMPT INCOME HSN)
-        # ======================================================
-        # Safe sheet getter (avoids sheet-name mismatch issue)
-        def get_sheet(wb, target_name):
-            def norm(x):
-                return str(x).strip().lower().replace(" ", "")
-            t = norm(target_name)
-            for s in wb.sheetnames:
-                if norm(s) == t:
-                    return wb[s]
-            return None
-
-        ws = get_sheet(wb, "hsn (b2c)")
-        if ws is None:
-            raise ValueError(f"Template is missing sheet: 'hsn (b2c)'. Available: {wb.sheetnames}")
-
-        r = 4
-
-        # -----------------------------------------
-        # 1️⃣ B2C data from B2B sheet (non-B2B invoices)
-        # -----------------------------------------
-        needed_cols = [
-            "HSN or SAC Code", "Total Transaction Value", "Item Taxable Value",
-            "IGST Amount", "CGST Amount", "SGST Amount"
-        ]
-
-        df_b2c_part1 = df_state_b2b[
-            df_state_b2b["Invoice Type"].astype(str).str.upper() != "B2B"
-        ].copy()
-
-        # If required columns missing, keep part1 empty (no crash)
-        if all(c in df_b2c_part1.columns for c in needed_cols):
-            df_b2c_part1 = df_b2c_part1[needed_cols].copy()
-            df_b2c_part1.rename(columns={"HSN or SAC Code": "HSN"}, inplace=True)
-            df_b2c_part1["HSN"] = df_b2c_part1["HSN"].astype(str).apply(clean_hsn)
-        else:
-            df_b2c_part1 = pd.DataFrame(columns=[
-                "HSN", "Total Transaction Value", "Item Taxable Value",
-                "IGST Amount", "CGST Amount", "SGST Amount"
-            ])
-
-        # -----------------------------------------
-        # 2️⃣ B2C PF data
-        # -----------------------------------------
-        df_b2c_pf_state = df_b2c_pf[
-            (df_b2c_pf["State"].astype(str).str.upper() == state) &
-            (df_b2c_pf["Month_norm"].str.contains(MONTH_NORM, na=False))
-        ].copy()
-
-        df_b2c_part2 = pd.DataFrame(columns=[
-            "HSN", "Total Transaction Value", "Item Taxable Value",
-            "IGST Amount", "CGST Amount", "SGST Amount"
-        ])
-
-        # This part only works if your B2C PF sheet has HSN column
-        if (not df_b2c_pf_state.empty) and ("HSN" in df_b2c_pf_state.columns):
-            df_b2c_part2 = pd.DataFrame({
-                "HSN": df_b2c_pf_state["HSN"].astype(str).apply(clean_hsn),
-                "Total Transaction Value": (
-                    df_b2c_pf_state.get("LPF", 0).fillna(0) +
-                    df_b2c_pf_state.get("IGST", 0).fillna(0) +
-                    df_b2c_pf_state.get("CGST", 0).fillna(0) +
-                    df_b2c_pf_state.get("SGST", 0).fillna(0)
-                ),
-                "Item Taxable Value": df_b2c_pf_state.get("LPF", 0).fillna(0),
-                "IGST Amount": df_b2c_pf_state.get("IGST", 0).fillna(0),
-                "CGST Amount": df_b2c_pf_state.get("CGST", 0).fillna(0),
-                "SGST Amount": df_b2c_pf_state.get("SGST", 0).fillna(0)
-            })
-
-        # -----------------------------------------
-        # 3️⃣ Combine B2C HSN data
-        # -----------------------------------------
-        df_hsn_b2c_all = pd.concat([df_b2c_part1, df_b2c_part2], ignore_index=True)
-
-        if df_hsn_b2c_all.empty:
-            df_hsn_b2c_grp = pd.DataFrame(columns=[
-                "HSN", "Total Transaction Value", "Item Taxable Value",
-                "IGST Amount", "CGST Amount", "SGST Amount"
-            ])
-        else:
-            df_hsn_b2c_grp = df_hsn_b2c_all.groupby("HSN", as_index=False)[[
-                "Total Transaction Value", "Item Taxable Value",
-                "IGST Amount", "CGST Amount", "SGST Amount"
-            ]].sum()
-
-        # -----------------------------------------
-        # 4️⃣ CD NOTE UNREG adjustment (POS independent, HSN wise)
-        # -----------------------------------------
-        df_cdun_state = filter_state_month(df_cdunreg, state, MONTH).copy()
-
-        df_cdun_hsn = pd.DataFrame(columns=[
-            "HSN", "Total Transaction Value", "Item Taxable Value",
-            "IGST Amount", "CGST Amount", "SGST Amount"
-        ])
-
-        if (not df_cdun_state.empty) and all(c in df_cdun_state.columns for c in needed_cols):
-            df_cdun_hsn = df_cdun_state[needed_cols].copy()
-            df_cdun_hsn.rename(columns={"HSN or SAC Code": "HSN"}, inplace=True)
-            df_cdun_hsn["HSN"] = df_cdun_hsn["HSN"].astype(str).apply(clean_hsn)
-
-        if df_cdun_hsn.empty:
-            df_cdun_grp = pd.DataFrame(columns=df_hsn_b2c_grp.columns)
-        else:
-            df_cdun_grp = df_cdun_hsn.groupby("HSN", as_index=False)[[
-                "Total Transaction Value", "Item Taxable Value",
-                "IGST Amount", "CGST Amount", "SGST Amount"
-            ]].sum()
-
-        if df_hsn_b2c_grp.empty:
-            df_final_b2c_hsn = df_hsn_b2c_grp.copy()
-        else:
-            df_final_b2c_hsn = df_hsn_b2c_grp.merge(
-                df_cdun_grp,
-                on="HSN",
-                how="left",
-                suffixes=("", "_CD")
-            ).fillna(0)
-
-            df_final_b2c_hsn["Total Transaction Value"] -= df_final_b2c_hsn.get("Total Transaction Value_CD", 0)
-            df_final_b2c_hsn["Item Taxable Value"] -= df_final_b2c_hsn.get("Item Taxable Value_CD", 0)
-            df_final_b2c_hsn["IGST Amount"] -= df_final_b2c_hsn.get("IGST Amount_CD", 0)
-            df_final_b2c_hsn["CGST Amount"] -= df_final_b2c_hsn.get("CGST Amount_CD", 0)
-            df_final_b2c_hsn["SGST Amount"] -= df_final_b2c_hsn.get("SGST Amount_CD", 0)
-
-            df_final_b2c_hsn = df_final_b2c_hsn[[
-                "HSN", "Total Transaction Value", "Item Taxable Value",
-                "IGST Amount", "CGST Amount", "SGST Amount"
-            ]].copy()
-
-        df_final_b2c_hsn[[
-            "Total Transaction Value", "Item Taxable Value",
-            "IGST Amount", "CGST Amount", "SGST Amount"
-        ]] = df_final_b2c_hsn[[
-            "Total Transaction Value", "Item Taxable Value",
-            "IGST Amount", "CGST Amount", "SGST Amount"
-        ]].clip(lower=0)
-
-        # -----------------------------------------
-        # 5️⃣ ADD EXEMPT INCOME HSN (NEW REQUIREMENT)
-        # -----------------------------------------
-        df_exempt_state = df_exempt[
-            df_exempt["Row Labels"].astype(str).str.upper().str.strip() == state
-        ].copy()
-
-        if "Month" in df_exempt_state.columns:
-            df_exempt_state = df_exempt_state[
-                df_exempt_state["Month"].astype(str).str.lower().str.contains(MONTH_NORM, na=False)
-            ]
-
-        if (not df_exempt_state.empty) and ("HSN or SAC Code" in df_exempt_state.columns):
-            df_exempt_hsn = pd.DataFrame({
-                "HSN": df_exempt_state["HSN or SAC Code"].astype(str).apply(clean_hsn),
-                "Total Transaction Value": df_exempt_state["Sum of Collection Intrest"].fillna(0),
-                "Item Taxable Value": df_exempt_state["Sum of Collection Intrest"].fillna(0),
-                "IGST Amount": 0,
-                "CGST Amount": 0,
-                "SGST Amount": 0
-            })
-
-            df_final_b2c_hsn = pd.concat([df_final_b2c_hsn, df_exempt_hsn], ignore_index=True)
-            df_final_b2c_hsn = df_final_b2c_hsn.groupby("HSN", as_index=False).sum()
-
-        # -----------------------------------------
-        # 6️⃣ Write to Excel
-        # -----------------------------------------
-        for _, row in df_final_b2c_hsn.iterrows():
-            ws[f"A{r}"] = row["HSN"]
-            ws[f"E{r}"] = row["Total Transaction Value"]
-            ws[f"F{r}"] = row["Item Taxable Value"]
-
-            # Rate = 0 only for HSN 997114, else 18
-            ws[f"G{r}"] = 0 if str(row["HSN"]).strip() == "997114" else 18
-
-            ws[f"H{r}"] = row["IGST Amount"]
-            ws[f"I{r}"] = row["CGST Amount"]
-            ws[f"J{r}"] = row["SGST Amount"]
-            r += 1
-
-
-        # DOCS (as per your existing block)
-        ws = wb["docs"]
-
-        df_docs_b2b = df_state_b2b[df_state_b2b.get("Invoice Number").notna()].copy() if not df_state_b2b.empty else pd.DataFrame()
-        if not df_docs_b2b.empty and "Invoice Number" in df_docs_b2b.columns:
-            df_docs_b2b["InvNum"] = df_docs_b2b["Invoice Number"].apply(extract_last_num)
-            min_inv = df_docs_b2b["InvNum"].min()
-            max_inv = df_docs_b2b["InvNum"].max()
-            total_count = max_inv - min_inv + 1
-            sr_from = df_docs_b2b[df_docs_b2b["InvNum"] == min_inv]["Invoice Number"].iloc[0]
-            sr_to = df_docs_b2b[df_docs_b2b["InvNum"] == max_inv]["Invoice Number"].iloc[0]
-        else:
-            sr_from = sr_to = ""
-            total_count = 0
-
-        ws["A4"] = "Invoices for outward supply"
-        ws["B4"] = sr_from
-        ws["C4"] = sr_to
-        ws["D4"] = total_count
-        ws["E4"] = 0
-
-        df_b2c_pf_state_prev = df_b2c_pf[
-            (df_b2c_pf["State"].astype(str).str.upper() == state) &
-            (~df_b2c_pf["Month_norm"].str.contains(MONTH_NORM, na=False))
-        ]
-        df_b2c_pf_state_curr = df_b2c_pf[
-            (df_b2c_pf["State"].astype(str).str.upper() == state) &
-            (df_b2c_pf["Month_norm"].str.contains(MONTH_NORM, na=False))
-        ]
-
-        T_prev = len(df_b2c_pf_state_prev)
-        T_curr = len(df_b2c_pf_state_curr)
-        sr_from_b2c = T_prev + 1 if T_curr > 0 else ""
-        sr_to_b2c = T_prev + T_curr if T_curr > 0 else ""
-
-        ws["A5"] = "Invoices for outward supply"
-        ws["B5"] = sr_from_b2c
-        ws["C5"] = sr_to_b2c
-        ws["D5"] = T_curr
-        ws["E5"] = 0
-
-        ws["A6"] = "Invoices for outward supply"
-        ws["B6"] = ""
-        ws["C6"] = ""
-        ws["D6"] = ""
-        ws["E6"] = 0
-
-        df_cd_unreg_prev = df_cdunreg[
-            (df_cdunreg["State"].astype(str).str.upper() == state) &
-            (~df_cdunreg["Month"].astype(str).str.lower().str.contains(MONTH_NORM, na=False))
-        ]
-        df_cd_unreg_curr = df_cdunreg[
-            (df_cdunreg["State"].astype(str).str.upper() == state) &
-            (df_cdunreg["Month"].astype(str).str.lower().str.contains(MONTH_NORM, na=False))
-        ]
-        CD_prev = len(df_cd_unreg_prev)
-        CD_curr = len(df_cd_unreg_curr)
-        sr_from_cd = CD_prev + 1 if CD_curr > 0 else ""
-        sr_to_cd = CD_prev + CD_curr if CD_curr > 0 else ""
-
-        ws["A7"] = "Credit Note"
-        ws["B7"] = sr_from_cd
-        ws["C7"] = sr_to_cd
-        ws["D7"] = CD_curr
-        ws["E7"] = 0
-
-        df_dn_reg_prev = df_dn[
-            (df_dn["State"].astype(str).str.upper() == state) &
-            (~df_dn["Month"].astype(str).str.lower().str.contains(MONTH_NORM, na=False))
-        ]
-        df_dn_reg_curr = df_dn[
-            (df_dn["State"].astype(str).str.upper() == state) &
-            (df_dn["Month"].astype(str).str.lower().str.contains(MONTH_NORM, na=False))
-        ]
-        DN_prev = len(df_dn_reg_prev)
-        DN_curr = len(df_dn_reg_curr)
-        sr_from_dn = DN_prev + 1 if DN_curr > 0 else ""
-        sr_to_dn = DN_prev + DN_curr if DN_curr > 0 else ""
-
-        ws["A8"] = "Debit Note"
-        ws["B8"] = sr_from_dn
-        ws["C8"] = sr_to_dn
-        ws["D8"] = DN_curr
-        ws["E8"] = 0
-
-        # Keep your docs formatting fix
-
-        ws_docs = wb["docs"]
-        ws_docs["H4"] = ""
-        for col in range(1, ws_docs.max_column + 1):
-            cell = ws_docs.cell(row=5, column=col)
-            cell.font = Font(bold=False)
-            cell.alignment = Alignment(
-                vertical="center",
-                horizontal=cell.alignment.horizontal,
-                wrap_text=False
-            )
-        ws_docs.row_dimensions[5].height = None
 
         out_path = os.path.join(OUTPUT_FOLDER, f"GSTR1_{MONTH}_{state}.xlsx")
         os.makedirs(OUTPUT_FOLDER, exist_ok=True)
         wb.save(out_path)
 
-        # --- Progress updates ---
         if status_box is not None:
-            status_box.info(f"✅ Completed: {state}  ({i}/{total_states})")
-
+            status_box.info(f"✅ Completed: {state}  ({i}/{len(STATE_LIST)})")
         if progress_bar is not None:
-            progress_bar.progress(i / total_states)
-
-        # ETA based on average time per state so far
+            progress_bar.progress(i / len(STATE_LIST))
         if eta_box is not None:
             elapsed = time.time() - start_all
             avg_per_state = elapsed / max(i, 1)
-            remaining = avg_per_state * (total_states - i)
+            remaining = avg_per_state * (len(STATE_LIST) - i)
             eta_box.caption(f"⏳ Estimated remaining processing time: ~{int(remaining)} sec")
 
     return
 
 
 # ======================================================
-# UI
+# =================== ✅ DAY BOOK CORE ==================
+# ======================================================
+TRANSACTION_WISE_STATEMENTS = {"ICICI 7021"}
+
+BANK_NAME_MAP = {
+    "ICICI 7021": "ICICI Bank - 008205007021 - C",
+    "ICICI 6086": "ICICI Bank - 008205006086 - C",
+}
+
+DEFAULT_DEPARTMENT = "H0001"
+DEFAULT_BRANCH_ID = "H0001"
+
+BANK_LEDGER_PAIRS = {
+    ("311701", "HO0001"), ("311701", "HO0002"), ("311701", "HO0004"), ("311701", "HO0005"),
+    ("311701", "HO0006"), ("311701", "HO0008"), ("311701", "HO0009"), ("311701", "HO0010"),
+    ("311701", "HO0011"), ("311701", "HO0012"), ("311701", "HO0014"), ("311701", "HO0015"),
+    ("311701", "HO0016"), ("311701", "HO0018"), ("311701", "HO0019"), ("311701", "HO0020"),
+    ("311702", ""), ("311702", "HO0001"),
+    ("311703", ""), ("311703", "HO0002"), ("311703", "HO0003"),
+    ("311704", ""), ("311704", "HO0001"),
+    ("311705", ""), ("311705", "HO0001"), ("311705", "HO0002"),
+    ("311706", ""), ("311706", "HO0001"),
+    ("311707", ""), ("311707", "HO0001"), ("311707", "HO0002"),
+    ("311708", ""), ("311709", ""), ("311709", "HO0001"),
+    ("311710", ""), ("311711", ""), ("311711", "HO0001"), ("311711", "HO0002"),
+    ("311712", ""), ("311712", "HO0001"),
+    ("311713", "HO0001"),
+    ("311714", ""),
+    ("311715", ""), ("311715", "HO0001"),
+    ("311716", ""), ("311716", "HO0001"), ("311716", "HO0002"),
+    ("311717", ""), ("311717", "HO0002"),
+    ("311718", ""), ("311718", "HO0001"),
+    ("311719", ""), ("311719", "HO0001"),
+    ("311720", "HO0001"),
+}
+
+
+def _clean_text(x):
+    if pd.isna(x):
+        return ""
+    return str(x).strip()
+
+
+def _find_header_row_xlsx(file_path, required_headers=None, max_scan_rows=80):
+    preview = pd.read_excel(file_path, header=None, nrows=max_scan_rows)
+    required_headers = [h.strip().lower() for h in (required_headers or [])]
+    for i in range(len(preview)):
+        row_vals = preview.iloc[i].astype(str).str.strip().str.lower().tolist()
+        if all(any(req == cell for cell in row_vals) for req in required_headers):
+            return i
+    return None
+
+
+def _safe_sheet_name(name: str, max_len: int = 31) -> str:
+    bad = [":", "\\", "/", "?", "*", "[", "]"]
+    for b in bad:
+        name = name.replace(b, " ")
+    name = " ".join(name.split())
+    return name[:max_len] if len(name) > max_len else name
+
+
+def _build_keyword_table(coa_df: pd.DataFrame) -> pd.DataFrame:
+    coa_df.columns = [c.strip() for c in coa_df.columns]
+    if "Account Name" not in coa_df.columns:
+        raise ValueError("COA.xlsx must have column: 'Account Name'")
+    refer_cols = [c for c in coa_df.columns if c.upper().startswith("REFER")]
+    if not refer_cols:
+        raise ValueError("No Refer columns found in COA (Refer1..ReferN)")
+
+    rows = []
+    for _, r in coa_df.iterrows():
+        ledger = _clean_text(r.get("Account Name"))
+        if not ledger:
+            continue
+        for col in refer_cols:
+            kw = _clean_text(r.get(col))
+            if kw:
+                rows.append({"ledger": ledger, "keyword": kw})
+
+    kw_df = pd.DataFrame(rows)
+    if kw_df.empty:
+        raise ValueError("No keywords found in Refer columns.")
+    kw_df["kw_len"] = kw_df["keyword"].str.len()
+    return kw_df.sort_values("kw_len", ascending=False).reset_index(drop=True)
+
+
+def _map_ledger(description: str, kw_df: pd.DataFrame) -> str:
+    d = str(description).upper()
+    for _, r in kw_df.iterrows():
+        if r["keyword"].upper() in d:
+            return r["ledger"]
+    return "UNMAPPED"
+
+
+def _move_others_last_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    df = df.copy()
+    df["_is_others"] = df["Ledger"].astype(str).str.strip().str.upper().eq("OTHERS")
+    df = df.sort_values(["_is_others"], ascending=[True]).drop(columns=["_is_others"])
+    return df.reset_index(drop=True)
+
+
+def _make_daybook(receipts: pd.DataFrame, payments: pd.DataFrame) -> pd.DataFrame:
+    receipts = receipts.reset_index(drop=True)
+    payments = payments.reset_index(drop=True)
+    max_len = max(len(receipts), len(payments))
+    rows = []
+    for i in range(max_len):
+        r_led = receipts.loc[i, "Ledger"] if i < len(receipts) else ""
+        r_amt = receipts.loc[i, "Amount"] if i < len(receipts) else ""
+        p_led = payments.loc[i, "Ledger"] if i < len(payments) else ""
+        p_amt = payments.loc[i, "Amount"] if i < len(payments) else ""
+        rows.append([r_led, r_amt, p_led, p_amt])
+    return pd.DataFrame(rows, columns=["RECEIPT", "AMOUNT", "PAYMENTS", "AMOUNT.1"])
+
+
+def _build_coa_lookup(coa_df: pd.DataFrame):
+    coa_df = coa_df.copy()
+    coa_df.columns = [c.strip() for c in coa_df.columns]
+    for needed in ["Account Name", "Account", "Sub Account"]:
+        if needed not in coa_df.columns:
+            raise ValueError(f"COA.xlsx must have column: '{needed}'")
+
+    by_name = {}
+    name_by_pair = {}
+    for _, r in coa_df.iterrows():
+        name = _clean_text(r["Account Name"])
+        acc = _clean_text(r["Account"])
+        sub = _clean_text(r["Sub Account"])
+        if name:
+            by_name[name] = (acc, sub)
+        name_by_pair[(acc, sub)] = name
+    return by_name, name_by_pair
+
+
+def _pick_document_date(bank_df: pd.DataFrame):
+    for col in ["Value Date", "Txn Posted Date", "Document Date"]:
+        if col in bank_df.columns:
+            ser = pd.to_datetime(bank_df[col], errors="coerce").dropna()
+            if len(ser):
+                return ser.iloc[0].date()
+    return None
+
+
+def _is_bank_pair(acc: str, sub: str) -> bool:
+    return (_clean_text(acc), _clean_text(sub)) in BANK_LEDGER_PAIRS
+
+
+def _bank_short(name: str) -> str:
+    s = _clean_text(name)
+    up = s.upper()
+    digit_runs = re.findall(r"\d{4,}", s)
+    last4 = digit_runs[-1][-4:] if digit_runs else ""
+    brand = None
+    for b in ["ICICI", "HDFC", "AXIS", "SBI", "IDBI", "PNB", "CANARA", "FEDERAL", "BANDHAN", "YES"]:
+        if b in up:
+            brand = b
+            break
+    if brand and last4:
+        return f"{brand} {last4}"
+    return last4 if last4 else s
+
+
+def _cv_ref(to_bank: str, from_bank: str) -> str:
+    return f"BEING ONLINE FUND TRANSFERRED TO {_bank_short(to_bank)} FROM {_bank_short(from_bank)}"
+
+
+def _create_entry(daybook_df: pd.DataFrame, bank_display_name: str,
+                  coa_by_name: dict, coa_name_by_pair: dict, doc_date):
+    bank_acc, bank_sub = coa_by_name.get(bank_display_name, ("", ""))
+    doc_date_val = doc_date.strftime("%d-%b-%y") if doc_date else ""
+
+    rows = []
+
+    def add_pair(journal_code, ref_text, debit_acc, debit_sub, credit_acc, credit_sub, amt):
+        rows.append({
+            "Journal Code": journal_code, "Sequence": 1, "Account": debit_acc, "Sub Account": debit_sub,
+            "Department": DEFAULT_DEPARTMENT, "Document Date": doc_date_val,
+            "Debit": amt, "Credit": "", "Supplier Id": "", "Customer Id": "", "SAC/HSN": "",
+            "Reference": ref_text, "Branch Id": DEFAULT_BRANCH_ID, "Invoice Num": "", "Comments": ""
+        })
+        rows.append({
+            "Journal Code": journal_code, "Sequence": 2, "Account": credit_acc, "Sub Account": credit_sub,
+            "Department": DEFAULT_DEPARTMENT, "Document Date": doc_date_val,
+            "Debit": "", "Credit": amt, "Supplier Id": "", "Customer Id": "", "SAC/HSN": "",
+            "Reference": ref_text, "Branch Id": DEFAULT_BRANCH_ID, "Invoice Num": "", "Comments": ""
+        })
+
+    df = daybook_df.copy()
+
+    # Receipt
+    for _, r in df.iterrows():
+        ledger = _clean_text(r.get("RECEIPT"))
+        if not ledger or ledger.upper() == "TOTAL":
+            continue
+        try:
+            amt = float(r.get("AMOUNT"))
+        except Exception:
+            continue
+        if abs(amt) < 0.01:
+            continue
+
+        led_acc, led_sub = coa_by_name.get(ledger, ("", ""))
+
+        # ✅ CV if ANY side is bank-pair
+        is_cv = _is_bank_pair(bank_acc, bank_sub) or _is_bank_pair(led_acc, led_sub)
+
+        if is_cv:
+            other_bank = coa_name_by_pair.get((led_acc, led_sub), ledger)
+            ref = _cv_ref(to_bank=bank_display_name, from_bank=other_bank)
+            journal = "CV"
+        else:
+            ref = f"BEING {ledger} RECEIPT IN {bank_display_name}"
+            journal = "BR"
+
+        add_pair(journal, ref, bank_acc, bank_sub, led_acc, led_sub, amt)
+
+    # Payment
+    for _, r in df.iterrows():
+        ledger = _clean_text(r.get("PAYMENTS"))
+        if not ledger or ledger.upper() == "TOTAL":
+            continue
+        try:
+            amt = float(r.get("AMOUNT.1"))
+        except Exception:
+            continue
+        if abs(amt) < 0.01:
+            continue
+
+        led_acc, led_sub = coa_by_name.get(ledger, ("", ""))
+
+        is_cv = _is_bank_pair(bank_acc, bank_sub) or _is_bank_pair(led_acc, led_sub)
+
+        if is_cv:
+            other_bank = coa_name_by_pair.get((led_acc, led_sub), ledger)
+            ref = _cv_ref(to_bank=other_bank, from_bank=bank_display_name)
+            journal = "CV"
+        else:
+            ref = f"BEING {ledger} PAYMENT FROM {bank_display_name}"
+            journal = "BP"
+
+        add_pair(journal, ref, led_acc, led_sub, bank_acc, bank_sub, amt)
+
+    cols = [
+        "Journal Code", "Sequence", "Account", "Sub Account", "Department", "Document Date",
+        "Debit", "Credit", "Supplier Id", "Customer Id", "SAC/HSN", "Reference",
+        "Branch Id", "Invoice Num", "Comments"
+    ]
+    return pd.DataFrame(rows, columns=cols)
+
+
+def run_daybook_from_zip(zip_bytes: bytes, coa_bytes: bytes, output_path: str):
+    coa = pd.read_excel(pd.io.common.BytesIO(coa_bytes))
+    kw_df = _build_keyword_table(coa)
+    coa_by_name, coa_name_by_pair = _build_coa_lookup(coa)
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        zpath = os.path.join(tmpdir, "statements.zip")
+        with open(zpath, "wb") as f:
+            f.write(zip_bytes)
+
+        with zipfile.ZipFile(zpath, "r") as z:
+            z.extractall(tmpdir)
+
+        files = []
+        for root, _, fs in os.walk(tmpdir):
+            for fn in fs:
+                if fn.lower().endswith(".xlsx") and not fn.startswith("~$"):
+                    files.append(os.path.join(root, fn))
+
+        if not files:
+            raise ValueError("No .xlsx statements found inside ZIP.")
+
+        thin = Side(style="thin", color="000000")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        header_fill = PatternFill("solid", fgColor="BFBFBF")
+        amt_fill = PatternFill("solid", fgColor="FFF200")
+        others_fill = PatternFill("solid", fgColor="F8CBAD")
+        unmapped_fill = PatternFill("solid", fgColor="FFC7CE")
+        bold = Font(bold=True)
+
+        for fp in sorted(files):
+            base = os.path.splitext(os.path.basename(fp))[0]
+            bank_name = BANK_NAME_MAP.get(base, base)
+
+            header_row = _find_header_row_xlsx(fp, required_headers=["Description", "Cr/Dr"])
+            if header_row is None:
+                header_row = 6
+
+            bank = pd.read_excel(fp, header=header_row)
+            bank.columns = [str(c).strip() for c in bank.columns]
+
+            if "Description" not in bank.columns or "Cr/Dr" not in bank.columns:
+                continue
+
+            amt_candidates = [c for c in bank.columns if "Transaction Amount" in c]
+            if not amt_candidates:
+                continue
+            amt_col = amt_candidates[0]
+
+            bank["Cr/Dr"] = bank["Cr/Dr"].astype(str).str.strip().str.upper()
+            bank[amt_col] = pd.to_numeric(bank[amt_col], errors="coerce").fillna(0)
+            bank["Ledger"] = bank["Description"].astype(str).apply(lambda x: _map_ledger(x, kw_df))
+
+            total_cr = bank.loc[bank["Cr/Dr"] == "CR", amt_col].sum()
+            total_dr = bank.loc[bank["Cr/Dr"] == "DR", amt_col].sum()
+
+            is_txn = base in TRANSACTION_WISE_STATEMENTS
+
+            if not is_txn:
+                cr = bank[bank["Cr/Dr"] == "CR"].groupby("Ledger", as_index=False)[amt_col].sum()
+                cr = cr[cr["Ledger"] != "UNMAPPED"].rename(columns={amt_col: "Amount"})
+                cr_diff = round(total_cr - cr["Amount"].sum(), 2) if len(cr) else round(total_cr, 2)
+                if abs(cr_diff) > 0.01:
+                    cr = pd.concat([cr, pd.DataFrame([{"Ledger": "Others", "Amount": cr_diff}])], ignore_index=True)
+
+                dr = bank[bank["Cr/Dr"] == "DR"].groupby("Ledger", as_index=False)[amt_col].sum()
+                dr = dr[dr["Ledger"] != "UNMAPPED"].rename(columns={amt_col: "Amount"})
+                dr_diff = round(total_dr - dr["Amount"].sum(), 2) if len(dr) else round(total_dr, 2)
+                if abs(dr_diff) > 0.01:
+                    dr = pd.concat([dr, pd.DataFrame([{"Ledger": "Others", "Amount": dr_diff}])], ignore_index=True)
+
+                cr = _move_others_last_df(cr.sort_values("Ledger").reset_index(drop=True))
+                dr = _move_others_last_df(dr.sort_values("Ledger").reset_index(drop=True))
+
+                daybook_df = _make_daybook(cr, dr)
+
+            else:
+                cr = bank[(bank["Cr/Dr"] == "CR") & (bank["Ledger"].str.upper() != "UNMAPPED")][["Ledger", amt_col]].copy()
+                cr = cr.rename(columns={amt_col: "Amount"})
+                dr = bank[(bank["Cr/Dr"] == "DR") & (bank["Ledger"].str.upper() != "UNMAPPED")][["Ledger", amt_col]].copy()
+                dr = dr.rename(columns={amt_col: "Amount"})
+
+                cr_diff = round(total_cr - cr["Amount"].sum(), 2) if len(cr) else round(total_cr, 2)
+                dr_diff = round(total_dr - dr["Amount"].sum(), 2) if len(dr) else round(total_dr, 2)
+
+                if abs(cr_diff) > 0.01:
+                    cr = pd.concat([cr, pd.DataFrame([{"Ledger": "Others", "Amount": cr_diff}])], ignore_index=True)
+                if abs(dr_diff) > 0.01:
+                    dr = pd.concat([dr, pd.DataFrame([{"Ledger": "Others", "Amount": dr_diff}])], ignore_index=True)
+
+                cr = _move_others_last_df(cr)
+                dr = _move_others_last_df(dr)
+                daybook_df = _make_daybook(cr, dr)
+
+            mapping_cols = [c for c in ["Value Date", "Txn Posted Date"] if c in bank.columns]
+            mapping_df = bank[mapping_cols + ["Description", "Cr/Dr", amt_col, "Ledger"]].copy()
+            mapping_df = mapping_df.rename(columns={amt_col: "Amount"})
+
+            doc_date = _pick_document_date(bank)
+            entry_df = _create_entry(daybook_df, bank_name, coa_by_name, coa_name_by_pair, doc_date)
+
+            db_name = _safe_sheet_name(f"DayBook_{bank_name}")
+            mp_name = _safe_sheet_name(f"Mapping_{bank_name}")
+            en_name = _safe_sheet_name(f"Entry_{bank_name}")
+
+            def uniq(nm):
+                if nm not in wb.sheetnames:
+                    return nm
+                i = 1
+                while True:
+                    nn = _safe_sheet_name(f"{nm}_{i}")
+                    if nn not in wb.sheetnames:
+                        return nn
+                    i += 1
+
+            db_name, mp_name, en_name = uniq(db_name), uniq(mp_name), uniq(en_name)
+
+            # DayBook write
+            ws = wb.create_sheet(db_name)
+            ws["A1"] = bank_name
+            ws["A1"].font = Font(bold=True, size=14)
+            ws.merge_cells("A1:D1")
+            ws["A1"].alignment = Alignment(horizontal="center")
+
+            start_row = 3
+            headers = ["RECEIPT", "AMOUNT", "PAYMENTS", "AMOUNT"]
+            for c, h in enumerate(headers, start=1):
+                cell = ws.cell(row=start_row, column=c, value=h)
+                cell.font = bold
+                cell.fill = header_fill
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = border
+
+            for r in range(len(daybook_df)):
+                rec_led = str(daybook_df.iloc[r, 0]).strip().upper()
+                pay_led = str(daybook_df.iloc[r, 2]).strip().upper()
+                row_vals = [daybook_df.iloc[r, 0], daybook_df.iloc[r, 1], daybook_df.iloc[r, 2], daybook_df.iloc[r, 3]]
+
+                for c, val in enumerate(row_vals, start=1):
+                    cell = ws.cell(row=start_row + 1 + r, column=c, value=val)
+                    if c in [2, 4]:
+                        cell.fill = amt_fill
+                        cell.number_format = "#,##0.00"
+                        cell.alignment = Alignment(horizontal="right", vertical="center")
+                    else:
+                        cell.alignment = Alignment(horizontal="left", vertical="center")
+
+                    if c in [1, 2] and rec_led == "OTHERS":
+                        cell.fill = others_fill
+                        if c == 1:
+                            cell.hyperlink = f"#'{mp_name}'!A1"
+                            cell.font = Font(color="0563C1", underline="single")
+
+                    if c in [3, 4] and pay_led == "OTHERS":
+                        cell.fill = others_fill
+                        if c == 3:
+                            cell.hyperlink = f"#'{mp_name}'!A1"
+                            cell.font = Font(color="0563C1", underline="single")
+
+                    cell.border = border
+
+            last_data_row = start_row + len(daybook_df)
+            total_row = last_data_row + 1
+
+            ws.cell(row=total_row, column=1, value="TOTAL").font = bold
+            ws.cell(row=total_row, column=1).fill = header_fill
+            ws.cell(row=total_row, column=1).border = border
+
+            ws.cell(row=total_row, column=2, value=f"=SUM(B{start_row+1}:B{last_data_row})").font = bold
+            ws.cell(row=total_row, column=2).fill = amt_fill
+            ws.cell(row=total_row, column=2).number_format = "#,##0.00"
+            ws.cell(row=total_row, column=2).alignment = Alignment(horizontal="right")
+            ws.cell(row=total_row, column=2).border = border
+
+            ws.cell(row=total_row, column=3, value="TOTAL").font = bold
+            ws.cell(row=total_row, column=3).fill = header_fill
+            ws.cell(row=total_row, column=3).border = border
+
+            ws.cell(row=total_row, column=4, value=f"=SUM(D{start_row+1}:D{last_data_row})").font = bold
+            ws.cell(row=total_row, column=4).fill = amt_fill
+            ws.cell(row=total_row, column=4).number_format = "#,##0.00"
+            ws.cell(row=total_row, column=4).alignment = Alignment(horizontal="right")
+            ws.cell(row=total_row, column=4).border = border
+
+            ws.column_dimensions["A"].width = 50
+            ws.column_dimensions["B"].width = 18
+            ws.column_dimensions["C"].width = 50
+            ws.column_dimensions["D"].width = 18
+
+            # Mapping write (only UNMAPPED visible)
+            ws2 = wb.create_sheet(mp_name)
+            for c, col_name in enumerate(mapping_df.columns, start=1):
+                cell = ws2.cell(row=1, column=c, value=col_name)
+                cell.font = bold
+                cell.fill = header_fill
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = border
+
+            for idx in range(len(mapping_df)):
+                ledger_val = str(mapping_df.loc[idx, "Ledger"]).strip().upper()
+                is_unmapped = ledger_val == "UNMAPPED"
+                excel_row = idx + 2
+                if not is_unmapped:
+                    ws2.row_dimensions[excel_row].hidden = True
+
+                for c, col_name in enumerate(mapping_df.columns, start=1):
+                    val = mapping_df.loc[idx, col_name]
+                    cell = ws2.cell(row=excel_row, column=c, value=val)
+                    if col_name.upper() == "AMOUNT":
+                        cell.number_format = "#,##0.00"
+                        cell.alignment = Alignment(horizontal="right", vertical="center")
+                    else:
+                        cell.alignment = Alignment(horizontal="left", vertical="center")
+
+                    if is_unmapped:
+                        cell.fill = unmapped_fill
+                    cell.border = border
+
+            last_row = len(mapping_df) + 1
+            last_col = len(mapping_df.columns)
+            last_col_letter = chr(64 + last_col)
+            table_ref = f"A1:{last_col_letter}{last_row}"
+            tbl_name = f"Tbl_{abs(hash(mp_name)) % 10_000_000}"
+            table = Table(displayName=tbl_name, ref=table_ref)
+            table.tableStyleInfo = TableStyleInfo(
+                name="TableStyleMedium2",
+                showFirstColumn=False,
+                showLastColumn=False,
+                showRowStripes=False,
+                showColumnStripes=False
+            )
+            ws2.add_table(table)
+            ws2.auto_filter.ref = table_ref
+            ws2.freeze_panes = "A2"
+
+            # Entry write
+            ws3 = wb.create_sheet(en_name)
+            for c, col_name in enumerate(entry_df.columns, start=1):
+                cell = ws3.cell(row=1, column=c, value=col_name)
+                cell.font = bold
+                cell.fill = header_fill
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = border
+
+            for r in range(len(entry_df)):
+                excel_row = r + 2
+                for c, col_name in enumerate(entry_df.columns, start=1):
+                    val = entry_df.iloc[r][col_name]
+                    cell = ws3.cell(row=excel_row, column=c, value=val)
+                    if col_name in ["Debit", "Credit"] and val not in ["", None]:
+                        cell.number_format = "#,##0.00"
+                        cell.alignment = Alignment(horizontal="right", vertical="center")
+                    else:
+                        cell.alignment = Alignment(horizontal="left", vertical="center")
+                    cell.border = border
+
+            ws3.freeze_panes = "A2"
+
+        wb.save(output_path)
+        return output_path
+
+
+# ======================================================
+# ====================== ✅ UI ==========================
 # ======================================================
 st.markdown("""
 <style>
@@ -799,41 +939,40 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="big-title">📑 GSTR-1 State-wise Automation</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Upload → Validate → Process → Download</div>', unsafe_allow_html=True)
+st.markdown('<div class="big-title">📌 HO Team Automations</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">GSTR-1 + HO Day Book</div>', unsafe_allow_html=True)
 st.markdown("<br>", unsafe_allow_html=True)
 
+# ================= GST SECTION =================
+st.markdown("## 📑 GSTR-1 State-wise Automation")
 st.markdown('<div class="card">', unsafe_allow_html=True)
 col1, col2 = st.columns([2, 1])
 
 with col1:
-    uploaded_file = st.file_uploader("📂 Upload GSTR1 format.xlsx", type=["xlsx"])
+    uploaded_file = st.file_uploader("📂 Upload GSTR1 format.xlsx", type=["xlsx"], key="gstr_upload")
 
 with col2:
     month = st.selectbox("📅 Select Month", [
         "January", "February", "March", "April", "May", "June",
         "July", "August", "September", "October", "November", "December"
-    ])
+    ], key="gstr_month")
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-# placeholders for progress UI
 progress_bar = st.progress(0)
 status_box = st.empty()
 eta_box = st.empty()
 
-if st.button("🚀 Generate State-wise Excel Files", use_container_width=True):
+if st.button("🚀 Generate State-wise Excel Files", use_container_width=True, key="gstr_run"):
     if uploaded_file is None:
         st.error("❌ Please upload GSTR1 format.xlsx")
         st.stop()
 
-    # Save upload to disk (keeping your existing approach)
     gstr1_path = os.path.join(UPLOAD_FOLDER, "GSTR1_format.xlsx")
     file_bytes = uploaded_file.getvalue()
     with open(gstr1_path, "wb") as f:
         f.write(file_bytes)
 
-    # ✅ Validation step (with clear error detection)
     errs, warns = validate_excel(gstr1_path)
     if errs:
         st.error("File validation failed. Please fix below issue(s):")
@@ -854,16 +993,13 @@ if st.button("🚀 Generate State-wise Excel Files", use_container_width=True):
         shutil.rmtree(OUTPUT_FOLDER)
     os.makedirs(OUTPUT_FOLDER)
 
-    # Reset progress UI
     progress_bar.progress(0)
     status_box.info("⏳ Starting processing...")
     eta_box.caption("")
 
-    # ✅ Cached read of sheets
     with st.spinner("📥 Reading Excel (cached for faster repeats)..."):
         df_gstr1, df_b2b, df_cd, df_dn, df_exempt, df_b2c_pf, df_cdunreg, df_b2c_onboard = read_all_sheets_cached(file_bytes)
 
-    # ✅ Progress bar + ETA while processing
     with st.spinner("⚙️ Processing state-wise files..."):
         run_gstr_process(
             df_gstr1, df_b2b, df_cd, df_dn, df_exempt,
@@ -876,73 +1012,18 @@ if st.button("🚀 Generate State-wise Excel Files", use_container_width=True):
         )
 
     status_box.success("🎉 Processing completed!")
-    # 🎉 Center Popup "It's Done" (auto-disappears)
-    done_popup = st.empty()
 
-    done_popup.markdown(
-        """
-        <div id="done-popup" style="
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: linear-gradient(90deg, #00b894, #0984e3);
-            color: white;
-            padding: 28px 36px;
-            border-radius: 16px;
-            font-size: 24px;
-            font-weight: 700;
-            text-align: center;
-            box-shadow: 0px 12px 30px rgba(0,0,0,0.35);
-            z-index: 9999;
-            animation: fadein 0.6s;
-        ">
-            🎉 It’s Done!<br>
-            <div style="font-size: 15px; font-weight: 400; margin-top: 8px;">
-                All State-wise Files Generated Successfully.<br>
-                You can now download your files.
-            </div>
-        </div>
-
-        <style>
-        @keyframes fadein {
-            from { opacity: 0; transform: translate(-50%, -60%); }
-            to   { opacity: 1; transform: translate(-50%, -50%); }
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
-
-    # Show for a few seconds, then remove
-    time.sleep(4)
-    done_popup.empty()
-
-    # ✅ ZIP creation (show “preparing download”)
     zip_path = os.path.join(OUTPUT_ROOT, f"GSTR1_{MONTH}.zip")
-
     with st.spinner("📦 Preparing ZIP for download..."):
-        t0 = time.time()
         with zipfile.ZipFile(zip_path, "w") as zipf:
             for file in os.listdir(OUTPUT_FOLDER):
                 zipf.write(os.path.join(OUTPUT_FOLDER, file), arcname=file)
 
         log_activity(action="GSTR-1 Generated", month=MONTH, filename=f"GSTR1_{MONTH}.zip")
-        t1 = time.time()
 
-    # Show ZIP size + estimated download time (note: real download time depends on user internet)
-    zip_size_mb = os.path.getsize(zip_path) / (1024 * 1024)
     st.success("✅ ZIP Ready for download.")
-    st.caption(f"📦 ZIP Size: {zip_size_mb:.2f} MB | ZIP creation time: {t1 - t0:.1f} sec")
-
-    # Rough estimate for user clarity (cannot track real client download progress in Streamlit)
-    # 10 Mbps ~ 1.25 MB/s
-    est_seconds_10mbps = zip_size_mb / 1.25 if zip_size_mb > 0 else 0
-    st.caption(f"⏬ Estimated download time (example): ~{int(est_seconds_10mbps)} sec at ~10 Mbps. (Actual depends on internet speed)")
-
     st.markdown("## 📥 Download Summary")
 
-    # State-wise downloads (same as your existing)
     for file in os.listdir(OUTPUT_FOLDER):
         if not file.endswith(".xlsx"):
             continue
@@ -955,9 +1036,40 @@ if st.button("🚀 Generate State-wise Excel Files", use_container_width=True):
             st.markdown(f"✅ **{state_name}**")
         with c2:
             with open(file_path, "rb") as f:
-                if st.download_button("⬇ Download", data=f, file_name=file):
+                if st.download_button("⬇ Download", data=f, file_name=file, key=f"dl_{file}"):
                     log_activity(action="State File Downloaded", month=MONTH, filename=file)
 
-    # Main ZIP download
     with open(zip_path, "rb") as z:
-        st.download_button("⬇ Download GSTR1 ZIP", z, file_name=f"GSTR1_{MONTH}.zip")
+        st.download_button("⬇ Download GSTR1 ZIP", z, file_name=f"GSTR1_{MONTH}.zip", key="dl_zip", use_container_width=True)
+
+# ================= DAY BOOK SECTION =================
+st.markdown("---")
+st.markdown("## 🏦 HO Day Book Automation")
+
+colA, colB = st.columns([1, 1])
+with colA:
+    daybook_zip = st.file_uploader("📦 Upload Statement ZIP (statements.zip)", type=["zip"], key="db_zip")
+with colB:
+    coa_file = st.file_uploader("📄 Upload COA.xlsx", type=["xlsx"], key="db_coa")
+
+if daybook_zip and coa_file:
+    if st.button("🚀 Generate HO Day Book", use_container_width=True, key="db_run"):
+        try:
+            with st.spinner("⚙️ Processing Day Book..."):
+                tmpdir = tempfile.mkdtemp()
+                out_path = os.path.join(tmpdir, "HO_DayBook_AllStatements.xlsx")
+                run_daybook_from_zip(daybook_zip.getvalue(), coa_file.getvalue(), out_path)
+
+            st.success("✅ HO Day Book Generated Successfully!")
+            with open(out_path, "rb") as f:
+                st.download_button(
+                    "⬇ Download HO Day Book Output",
+                    data=f,
+                    file_name="HO_DayBook_AllStatements.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="db_download"
+                )
+        except Exception as e:
+            st.error("❌ Error while generating HO Day Book")
+            st.exception(e)
