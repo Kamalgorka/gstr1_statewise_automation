@@ -12,7 +12,7 @@ from openpyxl.styles import Font, Alignment
 
 import streamlit as st
 from ui import load_global_css
-
+from ho_daybook_core import run_daybook_from_uploaded_files
 load_global_css()
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -21,6 +21,18 @@ st.set_page_config(
     page_icon="📊",
     layout="wide"
 )
+
+# ✅ ADD BELOW THIS LINE
+ho_report = st.selectbox(
+    "",
+    [
+        "1) GSTR-1 State-wise Automation",
+        "2) HO DayBook Automation"
+    ],
+    key="ho_report_select"
+)
+st.markdown("<br>", unsafe_allow_html=True)
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -798,7 +810,7 @@ st.markdown("""
         box-shadow: 0px 2px 6px rgba(0,0,0,0.08); }
 </style>
 """, unsafe_allow_html=True)
-
+if ho_report == "1) GSTR-1 State-wise Automation":
 st.markdown('<div class="big-title">📑 GSTR-1 State-wise Automation</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Upload → Validate → Process → Download</div>', unsafe_allow_html=True)
 st.markdown("<br>", unsafe_allow_html=True)
@@ -961,3 +973,40 @@ if st.button("🚀 Generate State-wise Excel Files", use_container_width=True):
     # Main ZIP download
     with open(zip_path, "rb") as z:
         st.download_button("⬇ Download GSTR1 ZIP", z, file_name=f"GSTR1_{MONTH}.zip")
+elif ho_report == "2) HO DayBook Automation":
+
+    st.markdown('<div class="big-title">🏦 HO DayBook Automation</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Upload → Process → Download</div>', unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    col1, col2 = st.columns([2, 2])
+
+    with col1:
+        coa_file = st.file_uploader("📂 Upload COA.xlsx", type=["xlsx"], key="ho_db_coa")
+
+    with col2:
+        zip_file = st.file_uploader("📂 Upload Statement.zip", type=["zip"], key="ho_db_zip")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if st.button("🚀 Generate HO DayBook", use_container_width=True):
+        if coa_file is None or zip_file is None:
+            st.error("❌ Please upload both COA.xlsx and Statement.zip")
+            st.stop()
+
+        with st.spinner("⚙️ Processing DayBook..."):
+            output_bytes = run_daybook_from_uploaded_files(
+                coa_file.getvalue(),
+                zip_file.getvalue()
+            )
+
+        st.success("✅ HO DayBook Generated!")
+
+        st.download_button(
+            "⬇ Download HO_DayBook_AllStatements.xlsx",
+            data=output_bytes,
+            file_name="HO_DayBook_AllStatements.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
