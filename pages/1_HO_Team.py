@@ -10,7 +10,8 @@ import time
 from datetime import datetime
 from openpyxl.styles import Font, Alignment
 from ui import load_global_css
-from ho_daybook_core import run_daybook_from_uploaded_files
+from ho_reports.ho_daybook_core import run_daybook_from_uploaded_files
+
 load_global_css()
 
 warnings.filterwarnings("ignore", category=UserWarning)
