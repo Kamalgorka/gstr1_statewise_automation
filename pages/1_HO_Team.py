@@ -9,8 +9,6 @@ import shutil
 import time
 from datetime import datetime
 from openpyxl.styles import Font, Alignment
-
-import streamlit as st
 from ui import load_global_css
 from ho_daybook_core import run_daybook_from_uploaded_files
 load_global_css()
@@ -810,169 +808,176 @@ st.markdown("""
         box-shadow: 0px 2px 6px rgba(0,0,0,0.08); }
 </style>
 """, unsafe_allow_html=True)
+# ======================================================
+# UI
+# ======================================================
+st.markdown("""
+<style>
+.big-title { font-size: 30px; font-weight: 700; color: #0A3D62; }
+.sub-title { font-size: 16px; color: #576574; }
+.card { background-color: #F8F9FA; padding: 20px; border-radius: 12px;
+        box-shadow: 0px 2px 6px rgba(0,0,0,0.08); }
+</style>
+""", unsafe_allow_html=True)
+
 if ho_report == "1) GSTR-1 State-wise Automation":
-st.markdown('<div class="big-title">📑 GSTR-1 State-wise Automation</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Upload → Validate → Process → Download</div>', unsafe_allow_html=True)
-st.markdown("<br>", unsafe_allow_html=True)
 
-st.markdown('<div class="card">', unsafe_allow_html=True)
-col1, col2 = st.columns([2, 1])
+    st.markdown('<div class="big-title">📑 GSTR-1 State-wise Automation</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Upload → Validate → Process → Download</div>', unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-with col1:
-    uploaded_file = st.file_uploader("📂 Upload GSTR1 format.xlsx", type=["xlsx"])
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    col1, col2 = st.columns([2, 1])
 
-with col2:
-    month = st.selectbox("📅 Select Month", [
-        "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December"
-    ])
+    with col1:
+        uploaded_file = st.file_uploader("📂 Upload GSTR1 format.xlsx", type=["xlsx"])
 
-st.markdown('</div>', unsafe_allow_html=True)
+    with col2:
+        month = st.selectbox("📅 Select Month", [
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December"
+        ])
 
-# placeholders for progress UI
-progress_bar = st.progress(0)
-status_box = st.empty()
-eta_box = st.empty()
+    st.markdown('</div>', unsafe_allow_html=True)
 
-if st.button("🚀 Generate State-wise Excel Files", use_container_width=True):
-    if uploaded_file is None:
-        st.error("❌ Please upload GSTR1 format.xlsx")
-        st.stop()
+    # placeholders for progress UI
+    progress_bar = st.progress(0)
+    status_box = st.empty()
+    eta_box = st.empty()
 
-    # Save upload to disk (keeping your existing approach)
-    gstr1_path = os.path.join(UPLOAD_FOLDER, "GSTR1_format.xlsx")
-    file_bytes = uploaded_file.getvalue()
-    with open(gstr1_path, "wb") as f:
-        f.write(file_bytes)
+    if st.button("🚀 Generate State-wise Excel Files", use_container_width=True):
+        if uploaded_file is None:
+            st.error("❌ Please upload GSTR1 format.xlsx")
+            st.stop()
 
-    # ✅ Validation step (with clear error detection)
-    errs, warns = validate_excel(gstr1_path)
-    if errs:
-        st.error("File validation failed. Please fix below issue(s):")
-        for e in errs:
-            st.write(e)
-        st.stop()
+        # Save upload to disk (keeping your existing approach)
+        gstr1_path = os.path.join(UPLOAD_FOLDER, "GSTR1_format.xlsx")
+        file_bytes = uploaded_file.getvalue()
+        with open(gstr1_path, "wb") as f:
+            f.write(file_bytes)
 
-    if warns:
-        st.warning("Validation warning(s):")
-        for w in warns:
-            st.write(w)
+        # ✅ Validation step (with clear error detection)
+        errs, warns = validate_excel(gstr1_path)
+        if errs:
+            st.error("File validation failed. Please fix below issue(s):")
+            for e in errs:
+                st.write(e)
+            st.stop()
 
-    MONTH = month
-    MONTH_NORM = month.lower()
+        if warns:
+            st.warning("Validation warning(s):")
+            for w in warns:
+                st.write(w)
 
-    OUTPUT_FOLDER = os.path.join(OUTPUT_ROOT, MONTH)
-    if os.path.exists(OUTPUT_FOLDER):
-        shutil.rmtree(OUTPUT_FOLDER)
-    os.makedirs(OUTPUT_FOLDER)
+        MONTH = month
+        MONTH_NORM = month.lower()
 
-    # Reset progress UI
-    progress_bar.progress(0)
-    status_box.info("⏳ Starting processing...")
-    eta_box.caption("")
+        OUTPUT_FOLDER = os.path.join(OUTPUT_ROOT, MONTH)
+        if os.path.exists(OUTPUT_FOLDER):
+            shutil.rmtree(OUTPUT_FOLDER)
+        os.makedirs(OUTPUT_FOLDER)
 
-    # ✅ Cached read of sheets
-    with st.spinner("📥 Reading Excel (cached for faster repeats)..."):
-        df_gstr1, df_b2b, df_cd, df_dn, df_exempt, df_b2c_pf, df_cdunreg, df_b2c_onboard = read_all_sheets_cached(file_bytes)
+        # Reset progress UI
+        progress_bar.progress(0)
+        status_box.info("⏳ Starting processing...")
+        eta_box.caption("")
 
-    # ✅ Progress bar + ETA while processing
-    with st.spinner("⚙️ Processing state-wise files..."):
-        run_gstr_process(
-            df_gstr1, df_b2b, df_cd, df_dn, df_exempt,
-            df_b2c_pf, df_cdunreg, df_b2c_onboard,
-            MONTH, MONTH_NORM,
-            TEMPLATE_FILE, OUTPUT_FOLDER,
-            progress_bar=progress_bar,
-            status_box=status_box,
-            eta_box=eta_box
-        )
+        # ✅ Cached read of sheets
+        with st.spinner("📥 Reading Excel (cached for faster repeats)..."):
+            df_gstr1, df_b2b, df_cd, df_dn, df_exempt, df_b2c_pf, df_cdunreg, df_b2c_onboard = read_all_sheets_cached(file_bytes)
 
-    status_box.success("🎉 Processing completed!")
-    # 🎉 Center Popup "It's Done" (auto-disappears)
-    done_popup = st.empty()
+        # ✅ Progress bar + ETA while processing
+        with st.spinner("⚙️ Processing state-wise files..."):
+            run_gstr_process(
+                df_gstr1, df_b2b, df_cd, df_dn, df_exempt,
+                df_b2c_pf, df_cdunreg, df_b2c_onboard,
+                MONTH, MONTH_NORM,
+                TEMPLATE_FILE, OUTPUT_FOLDER,
+                progress_bar=progress_bar,
+                status_box=status_box,
+                eta_box=eta_box
+            )
 
-    done_popup.markdown(
-        """
-        <div id="done-popup" style="
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: linear-gradient(90deg, #00b894, #0984e3);
-            color: white;
-            padding: 28px 36px;
-            border-radius: 16px;
-            font-size: 24px;
-            font-weight: 700;
-            text-align: center;
-            box-shadow: 0px 12px 30px rgba(0,0,0,0.35);
-            z-index: 9999;
-            animation: fadein 0.6s;
-        ">
-            🎉 It’s Done!<br>
-            <div style="font-size: 15px; font-weight: 400; margin-top: 8px;">
-                All State-wise Files Generated Successfully.<br>
-                You can now download your files.
+        status_box.success("🎉 Processing completed!")
+
+        # 🎉 Center Popup "It's Done" (auto-disappears)
+        done_popup = st.empty()
+        done_popup.markdown(
+            """
+            <div id="done-popup" style="
+                position: fixed;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                background: linear-gradient(90deg, #00b894, #0984e3);
+                color: white;
+                padding: 28px 36px;
+                border-radius: 16px;
+                font-size: 24px;
+                font-weight: 700;
+                text-align: center;
+                box-shadow: 0px 12px 30px rgba(0,0,0,0.35);
+                z-index: 9999;
+                animation: fadein 0.6s;
+            ">
+                🎉 It’s Done!<br>
+                <div style="font-size: 15px; font-weight: 400; margin-top: 8px;">
+                    All State-wise Files Generated Successfully.<br>
+                    You can now download your files.
+                </div>
             </div>
-        </div>
 
-        <style>
-        @keyframes fadein {
-            from { opacity: 0; transform: translate(-50%, -60%); }
-            to   { opacity: 1; transform: translate(-50%, -50%); }
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
+            <style>
+            @keyframes fadein {
+                from { opacity: 0; transform: translate(-50%, -60%); }
+                to   { opacity: 1; transform: translate(-50%, -50%); }
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+        time.sleep(4)
+        done_popup.empty()
 
-    # Show for a few seconds, then remove
-    time.sleep(4)
-    done_popup.empty()
+        # ✅ ZIP creation (show “preparing download”)
+        zip_path = os.path.join(OUTPUT_ROOT, f"GSTR1_{MONTH}.zip")
 
-    # ✅ ZIP creation (show “preparing download”)
-    zip_path = os.path.join(OUTPUT_ROOT, f"GSTR1_{MONTH}.zip")
+        with st.spinner("📦 Preparing ZIP for download..."):
+            t0 = time.time()
+            with zipfile.ZipFile(zip_path, "w") as zipf:
+                for file in os.listdir(OUTPUT_FOLDER):
+                    zipf.write(os.path.join(OUTPUT_FOLDER, file), arcname=file)
 
-    with st.spinner("📦 Preparing ZIP for download..."):
-        t0 = time.time()
-        with zipfile.ZipFile(zip_path, "w") as zipf:
-            for file in os.listdir(OUTPUT_FOLDER):
-                zipf.write(os.path.join(OUTPUT_FOLDER, file), arcname=file)
+            log_activity(action="GSTR-1 Generated", month=MONTH, filename=f"GSTR1_{MONTH}.zip")
+            t1 = time.time()
 
-        log_activity(action="GSTR-1 Generated", month=MONTH, filename=f"GSTR1_{MONTH}.zip")
-        t1 = time.time()
+        zip_size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+        st.success("✅ ZIP Ready for download.")
+        st.caption(f"📦 ZIP Size: {zip_size_mb:.2f} MB | ZIP creation time: {t1 - t0:.1f} sec")
 
-    # Show ZIP size + estimated download time (note: real download time depends on user internet)
-    zip_size_mb = os.path.getsize(zip_path) / (1024 * 1024)
-    st.success("✅ ZIP Ready for download.")
-    st.caption(f"📦 ZIP Size: {zip_size_mb:.2f} MB | ZIP creation time: {t1 - t0:.1f} sec")
+        est_seconds_10mbps = zip_size_mb / 1.25 if zip_size_mb > 0 else 0
+        st.caption(f"⏬ Estimated download time (example): ~{int(est_seconds_10mbps)} sec at ~10 Mbps. (Actual depends on internet speed)")
 
-    # Rough estimate for user clarity (cannot track real client download progress in Streamlit)
-    # 10 Mbps ~ 1.25 MB/s
-    est_seconds_10mbps = zip_size_mb / 1.25 if zip_size_mb > 0 else 0
-    st.caption(f"⏬ Estimated download time (example): ~{int(est_seconds_10mbps)} sec at ~10 Mbps. (Actual depends on internet speed)")
+        st.markdown("## 📥 Download Summary")
 
-    st.markdown("## 📥 Download Summary")
+        for file in os.listdir(OUTPUT_FOLDER):
+            if not file.endswith(".xlsx"):
+                continue
 
-    # State-wise downloads (same as your existing)
-    for file in os.listdir(OUTPUT_FOLDER):
-        if not file.endswith(".xlsx"):
-            continue
+            state_name = file.replace(f"GSTR1_{MONTH}_", "").replace(".xlsx", "")
+            file_path = os.path.join(OUTPUT_FOLDER, file)
 
-        state_name = file.replace(f"GSTR1_{MONTH}_", "").replace(".xlsx", "")
-        file_path = os.path.join(OUTPUT_FOLDER, file)
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                st.markdown(f"✅ **{state_name}**")
+            with c2:
+                with open(file_path, "rb") as f:
+                    if st.download_button("⬇ Download", data=f, file_name=file):
+                        log_activity(action="State File Downloaded", month=MONTH, filename=file)
 
-        c1, c2 = st.columns([3, 1])
-        with c1:
-            st.markdown(f"✅ **{state_name}**")
-        with c2:
-            with open(file_path, "rb") as f:
-                if st.download_button("⬇ Download", data=f, file_name=file):
-                    log_activity(action="State File Downloaded", month=MONTH, filename=file)
+        with open(zip_path, "rb") as z:
+            st.download_button("⬇ Download GSTR1 ZIP", z, file_name=f"GSTR1_{MONTH}.zip")
 
-    # Main ZIP download
-    with open(zip_path, "rb") as z:
-        st.download_button("⬇ Download GSTR1 ZIP", z, file_name=f"GSTR1_{MONTH}.zip")
 elif ho_report == "2) HO DayBook Automation":
 
     st.markdown('<div class="big-title">🏦 HO DayBook Automation</div>', unsafe_allow_html=True)
@@ -995,18 +1000,22 @@ elif ho_report == "2) HO DayBook Automation":
             st.error("❌ Please upload both COA.xlsx and Statement.zip")
             st.stop()
 
-        with st.spinner("⚙️ Processing DayBook..."):
-            output_bytes = run_daybook_from_uploaded_files(
-                coa_file.getvalue(),
-                zip_file.getvalue()
+        try:
+            with st.spinner("⚙️ Processing DayBook..."):
+                output_bytes = run_daybook_from_uploaded_files(
+                    coa_file.getvalue(),
+                    zip_file.getvalue()
+                )
+
+            st.success("✅ HO DayBook Generated!")
+
+            st.download_button(
+                "⬇ Download HO_DayBook_AllStatements.xlsx",
+                data=output_bytes,
+                file_name="HO_DayBook_AllStatements.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
             )
-
-        st.success("✅ HO DayBook Generated!")
-
-        st.download_button(
-            "⬇ Download HO_DayBook_AllStatements.xlsx",
-            data=output_bytes,
-            file_name="HO_DayBook_AllStatements.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
+        except Exception as e:
+            st.error("❌ Error occurred. Details below:")
+            st.exception(e)
