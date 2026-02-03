@@ -29,6 +29,10 @@ BANK_LEDGER_ACCOUNTS = {
     "311717", "311718", "311719", "311720",
 }
 
+# ✅ Only for ICICI 6086: split "Death Claim Payout" by Refer keywords
+ICICI6086_SPLIT_LEDGER = "Death Claim Payout"
+
+
 # =========================
 # HELPERS (same as your script)
 # =========================
@@ -41,10 +45,12 @@ def find_header_row_xlsx(file_path, sheet_name=None, required_headers=None, max_
             return i
     return None
 
+
 def clean_text(x):
     if pd.isna(x):
         return ""
     return str(x).strip()
+
 
 def safe_sheet_name(name: str, max_len: int = 31) -> str:
     bad = [":", "\\", "/", "?", "*", "[", "]"]
@@ -55,16 +61,20 @@ def safe_sheet_name(name: str, max_len: int = 31) -> str:
         name = name[:max_len]
     return name
 
+
 def excel_hyperlink_sheet(sheet_name: str) -> str:
     return sheet_name.replace("'", "''")
+
 
 def build_keyword_table(coa_df: pd.DataFrame) -> pd.DataFrame:
     coa_df.columns = [c.strip() for c in coa_df.columns]
     if "Account Name" not in coa_df.columns:
         raise ValueError("COA.xlsx must have column: 'Account Name'")
+
     refer_cols = [c for c in coa_df.columns if c.upper().startswith("REFER")]
     if not refer_cols:
         raise ValueError("No Refer columns found in COA (Refer1..ReferN)")
+
     keyword_rows = []
     for _, row in coa_df.iterrows():
         ledger = clean_text(row.get("Account Name"))
@@ -74,41 +84,23 @@ def build_keyword_table(coa_df: pd.DataFrame) -> pd.DataFrame:
             kw = clean_text(row.get(ref_col))
             if kw:
                 keyword_rows.append({"ledger": ledger, "keyword": kw})
+
     kw_df = pd.DataFrame(keyword_rows)
     if kw_df.empty:
         raise ValueError("No keywords found in Refer columns.")
+
     kw_df["kw_len"] = kw_df["keyword"].str.len()
     kw_df = kw_df.sort_values("kw_len", ascending=False).reset_index(drop=True)
     return kw_df
 
+
 def map_ledger_from_keywords(description: str, kw_df: pd.DataFrame) -> str:
-    def split_by_references(df, desc_col, amt_col, refs):
-        """
-        Split rows by reference keywords in description.
-        Returns list of dicts: [{Ledger, Amount}, ...]
-        """
-        results = []
-
-        for ref in refs:
-            if not ref:
-                continue
-
-            mask = df[desc_col].str.upper().str.contains(ref.upper(), na=False)
-            if mask.any():
-                amt = df.loc[mask, amt_col].sum()
-                if abs(amt) > 0.01:
-                    results.append({
-                        "Ledger": ref,
-                        "Amount": amt
-                    })
-
-        return results
-
     d = str(description).upper()
     for _, r in kw_df.iterrows():
         if r["keyword"].upper() in d:
             return r["ledger"]
     return "UNMAPPED"
+
 
 def move_others_last_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -117,6 +109,7 @@ def move_others_last_df(df: pd.DataFrame) -> pd.DataFrame:
     df["_is_others"] = df["Ledger"].astype(str).str.strip().str.upper().eq("OTHERS")
     df = df.sort_values(["_is_others"], ascending=[True]).drop(columns=["_is_others"])
     return df.reset_index(drop=True)
+
 
 def make_daybook_layout_from_lists(receipt_list_df: pd.DataFrame, payment_list_df: pd.DataFrame) -> pd.DataFrame:
     receipt_list_df = receipt_list_df.reset_index(drop=True)
@@ -131,14 +124,17 @@ def make_daybook_layout_from_lists(receipt_list_df: pd.DataFrame, payment_list_d
         rows.append([r_led, r_amt, p_led, p_amt])
     return pd.DataFrame(rows, columns=["RECEIPT", "AMOUNT", "PAYMENTS", "AMOUNT"])
 
+
 def build_coa_lookup(coa_df: pd.DataFrame):
     coa_df = coa_df.copy()
     coa_df.columns = [c.strip() for c in coa_df.columns]
     for needed in ["Account Name", "Account", "Sub Account"]:
         if needed not in coa_df.columns:
             raise ValueError(f"COA.xlsx must have column: '{needed}'")
+
     lookup_by_name = {}
     lookup_name_by_pair = {}
+
     for _, r in coa_df.iterrows():
         name = clean_text(r["Account Name"])
         acc = clean_text(r["Account"])
@@ -147,7 +143,9 @@ def build_coa_lookup(coa_df: pd.DataFrame):
             lookup_by_name[name] = (acc, sub)
         if acc != "" or sub != "":
             lookup_name_by_pair[(acc, sub)] = name
+
     return lookup_by_name, lookup_name_by_pair
+
 
 def pick_document_date(bank_df: pd.DataFrame):
     for col in ["Value Date", "Txn Posted Date", "Document Date", "Tran Date"]:
@@ -157,9 +155,11 @@ def pick_document_date(bank_df: pd.DataFrame):
                 return ser.iloc[0].date()
     return None
 
+
 def is_bank_ledger_pair(acc: str, sub: str) -> bool:
     acc = clean_text(acc)
     return acc in BANK_LEDGER_ACCOUNTS
+
 
 def bank_short_name_from_account_name(account_name: str) -> str:
     s = clean_text(account_name)
@@ -177,12 +177,77 @@ def bank_short_name_from_account_name(account_name: str) -> str:
         return last4
     return s
 
+
 def make_cv_reference(to_bank_name: str, from_bank_name: str) -> str:
     to_short = bank_short_name_from_account_name(to_bank_name)
     from_short = bank_short_name_from_account_name(from_bank_name)
     return f"BEING ONLINE FUND TRANSFERRED TO {to_short} FROM {from_short}"
 
-def create_entry_df(daybook_df: pd.DataFrame, bank_display_name: str, coa_lookup_by_name: dict, coa_name_by_pair: dict, doc_date):
+
+# =========================
+# ✅ NEW: Refer Map + ICICI6086 Split
+# =========================
+def build_refer_map(coa_df: pd.DataFrame) -> dict:
+    """
+    Returns:
+      { "Death Claim Payout": ["KOTAK LIFE INSURANCE", "HDFCLIFE ...", "GO DIGIT ..."], ... }
+    """
+    coa_df = coa_df.copy()
+    coa_df.columns = [c.strip() for c in coa_df.columns]
+    refer_cols = [c for c in coa_df.columns if c.upper().startswith("REFER")]
+
+    ref_map = {}
+    for _, r in coa_df.iterrows():
+        ledger = clean_text(r.get("Account Name"))
+        if not ledger:
+            continue
+
+        refs = []
+        for c in refer_cols:
+            v = clean_text(r.get(c))
+            if v:
+                refs.append(v)
+
+        if refs:
+            ref_map[ledger] = refs
+
+    return ref_map
+
+
+def apply_icici6086_death_split(bank_df: pd.DataFrame, desc_col: str, refer_map: dict) -> pd.DataFrame:
+    """
+    Only for ICICI 6086: if Ledger == 'Death Claim Payout', split into:
+      'Death Claim Payout | <ReferName>'
+    based on description matching any Refer keyword.
+    """
+    target = ICICI6086_SPLIT_LEDGER
+    refs = refer_map.get(target, [])
+    if not refs:
+        return bank_df
+
+    b = bank_df.copy()
+    desc_upper = b[desc_col].astype(str).str.upper()
+
+    def split_ledger(i):
+        ledger = clean_text(b.loc[i, "Ledger"])
+        if ledger != target:
+            return ledger
+
+        d = desc_upper.loc[i]
+        for ref in refs:
+            if clean_text(ref).upper() in d:
+                return f"{target} | {clean_text(ref)}"
+        return ledger
+
+    b["Ledger"] = [split_ledger(i) for i in b.index]
+    return b
+
+
+# =========================
+# ENTRY CREATION
+# =========================
+def create_entry_df(daybook_df: pd.DataFrame, bank_display_name: str, coa_lookup_by_name: dict,
+                    coa_name_by_pair: dict, doc_date):
     bank_acc, bank_sub = coa_lookup_by_name.get(bank_display_name, ("", ""))
     if not bank_acc:
         raise ValueError(f"Bank ledger not found in COA for: {bank_display_name}")
@@ -226,15 +291,22 @@ def create_entry_df(daybook_df: pd.DataFrame, bank_display_name: str, coa_lookup
         if abs(amt_val) < 0.01:
             continue
 
-        led_acc, led_sub = coa_lookup_by_name.get(ledger_name, ("", ""))
+        # ✅ For split ledgers: "Death Claim Payout | KOTAK LIFE..."
+        base_ledger = ledger_name.split("|")[0].strip() if "|" in ledger_name else ledger_name
+        led_acc, led_sub = coa_lookup_by_name.get(base_ledger, ("", ""))
+
         is_cv = is_bank_ledger_pair(bank_acc, bank_sub) and is_bank_ledger_pair(led_acc, led_sub)
 
         if is_cv:
-            other_bank_name = coa_name_by_pair.get((led_acc, led_sub), ledger_name)
+            other_bank_name = coa_name_by_pair.get((led_acc, led_sub), base_ledger)
             ref_text = make_cv_reference(to_bank_name=bank_display_name, from_bank_name=other_bank_name)
             journal = "CV"
         else:
-            ref_text = f"BEING {ledger_name} RECEIPT IN {bank_display_name}"
+            if "|" in ledger_name:
+                ref_part = ledger_name.split("|", 1)[1].strip()
+                ref_text = f"BEING {base_ledger} RECEIPT - {ref_part} IN {bank_display_name}"
+            else:
+                ref_text = f"BEING {ledger_name} RECEIPT IN {bank_display_name}"
             journal = "BR"
 
         add_pair(journal, ref_text, bank_acc, bank_sub, led_acc, led_sub, amt_val)
@@ -251,15 +323,21 @@ def create_entry_df(daybook_df: pd.DataFrame, bank_display_name: str, coa_lookup
         if abs(amt_val) < 0.01:
             continue
 
-        led_acc, led_sub = coa_lookup_by_name.get(ledger_name, ("", ""))
+        base_ledger = ledger_name.split("|")[0].strip() if "|" in ledger_name else ledger_name
+        led_acc, led_sub = coa_lookup_by_name.get(base_ledger, ("", ""))
+
         is_cv = is_bank_ledger_pair(led_acc, led_sub) and is_bank_ledger_pair(bank_acc, bank_sub)
 
         if is_cv:
-            other_bank_name = coa_name_by_pair.get((led_acc, led_sub), ledger_name)
+            other_bank_name = coa_name_by_pair.get((led_acc, led_sub), base_ledger)
             ref_text = make_cv_reference(to_bank_name=other_bank_name, from_bank_name=bank_display_name)
             journal = "CV"
         else:
-            ref_text = f"BEING {ledger_name} PAYMENT FROM {bank_display_name}"
+            if "|" in ledger_name:
+                ref_part = ledger_name.split("|", 1)[1].strip()
+                ref_text = f"BEING {base_ledger} PAYMENT - {ref_part} FROM {bank_display_name}"
+            else:
+                ref_text = f"BEING {ledger_name} PAYMENT FROM {bank_display_name}"
             journal = "BP"
 
         add_pair(journal, ref_text, led_acc, led_sub, bank_acc, bank_sub, amt_val)
@@ -270,6 +348,7 @@ def create_entry_df(daybook_df: pd.DataFrame, bank_display_name: str, coa_lookup
         "Branch Id", "Invoice Num", "Comments"
     ]
     return pd.DataFrame(rows, columns=entry_cols)
+
 
 def detect_statement_columns(bank: pd.DataFrame, base_name: str):
     cols = [str(c).strip() for c in bank.columns]
@@ -305,7 +384,9 @@ def detect_statement_columns(bank: pd.DataFrame, base_name: str):
 
     raise ValueError(f"{base_name}: Unknown statement format.")
 
-def add_all_sheets_for_statement(wb: Workbook, statement_path: str, kw_df: pd.DataFrame, coa_lookup_by_name: dict, coa_name_by_pair: dict):
+
+def add_all_sheets_for_statement(wb: Workbook, statement_path: str, kw_df: pd.DataFrame,
+                                coa_lookup_by_name: dict, coa_name_by_pair: dict, refer_map: dict):
     base = os.path.splitext(os.path.basename(statement_path))[0]
     display_name = BANK_NAME_MAP.get(base, base)
     title_text = display_name
@@ -327,45 +408,19 @@ def add_all_sheets_for_statement(wb: Workbook, statement_path: str, kw_df: pd.Da
     bank[amt_col] = pd.to_numeric(bank[amt_col], errors="coerce").fillna(0)
 
     bank["Ledger"] = bank[desc_col].apply(lambda x: map_ledger_from_keywords(x, kw_df))
+
+    # ✅ Special split only for ICICI 6086 + Death Claim Payout
+    if base == "ICICI 6086":
+        bank = apply_icici6086_death_split(bank, desc_col, refer_map)
+
     total_cr = bank.loc[bank[crdr_col] == "CR", amt_col].sum()
     total_dr = bank.loc[bank[crdr_col] == "DR", amt_col].sum()
 
     # DayBook build (same)
     if not is_transaction_wise:
         bank_cr = bank[bank[crdr_col] == "CR"].copy()
-
-        # 🔥 SPECIAL LOGIC ONLY FOR ICICI 6086
-        if base == "ICICI 6086":
-
-            # Get COA references for Death Claim
-            death_row = coa_df[coa_df["Account Name"].str.contains("DEATH", case=False, na=False)]
-
-            if not death_row.empty:
-                refs = [
-                    str(death_row.iloc[0].get("Refer1", "")),
-                    str(death_row.iloc[0].get("Refer2", "")),
-                    str(death_row.iloc[0].get("Refer3", "")),
-                ]
-
-                split_rows = split_by_references(bank_cr, desc_col, amt_col, refs)
-
-                receipts = pd.DataFrame(split_rows)
-
-                # Other ledgers normal grouping
-                normal = bank_cr[~bank_cr[desc_col].str.contains("DEATH", case=False, na=False)]
-                normal_grp = normal.groupby("Ledger", as_index=False)[amt_col].sum()
-                normal_grp = normal_grp.rename(columns={amt_col: "Amount"})
-
-                receipts = pd.concat([receipts, normal_grp], ignore_index=True)
-
-            else:
-                receipts = bank_cr.groupby("Ledger", as_index=False)[amt_col].sum()
-                receipts = receipts.rename(columns={amt_col: "Amount"})
-
-        else:
-            receipts = bank_cr.groupby("Ledger", as_index=False)[amt_col].sum()
-            receipts = receipts.rename(columns={amt_col: "Amount"})
-
+        receipts = bank_cr.groupby("Ledger", as_index=False)[amt_col].sum()
+        receipts = receipts[receipts["Ledger"] != "UNMAPPED"].rename(columns={amt_col: "Amount"})
         mapped_receipt_total = receipts["Amount"].sum() if len(receipts) else 0.0
         receipt_diff = round(total_cr - mapped_receipt_total, 2)
         if abs(receipt_diff) > 0.01:
@@ -586,6 +641,7 @@ def add_all_sheets_for_statement(wb: Workbook, statement_path: str, kw_df: pd.Da
 
     ws3.freeze_panes = "A2"
 
+
 # =========================
 # ✅ STREAMLIT ENTRYPOINT
 # =========================
@@ -606,6 +662,10 @@ def run_daybook_from_uploaded_files(coa_bytes: bytes, zip_bytes: bytes) -> bytes
             f.write(zip_bytes)
 
         coa = pd.read_excel(coa_path, sheet_name=0)
+
+        # ✅ used for split (Refer1..ReferN)
+        refer_map = build_refer_map(coa)
+
         kw_df = build_keyword_table(coa)
         coa_lookup_by_name, coa_name_by_pair = build_coa_lookup(coa)
 
@@ -629,13 +689,16 @@ def run_daybook_from_uploaded_files(coa_bytes: bytes, zip_bytes: bytes) -> bytes
         errors = []
         for fp in sorted(statement_files):
             try:
-                add_all_sheets_for_statement(wb, fp, kw_df, coa_lookup_by_name, coa_name_by_pair)
+                add_all_sheets_for_statement(
+                    wb, fp, kw_df,
+                    coa_lookup_by_name, coa_name_by_pair,
+                    refer_map
+                )
             except Exception as e:
                 errors.append(f"{os.path.basename(fp)} -> {e}")
 
         wb.save(out_path)
 
-        # If you want to show errors in UI, we can return them separately later.
         with open(out_path, "rb") as f:
             output_bytes = f.read()
 
