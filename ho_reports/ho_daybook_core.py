@@ -383,14 +383,27 @@ def detect_statement_columns(bank: pd.DataFrame, base_name: str):
         return desc_col, crdr_col, amt_col
 
     raise ValueError(f"{base_name}: Unknown statement format.")
+def normalize_statement_key(base: str) -> str:
+    b = str(base).upper().strip()
+
+    if "ICICI" in b and "6086" in b:
+        return "ICICI 6086"
+    if "ICICI" in b and "7021" in b:
+        return "ICICI 7021"
+    if "AXIS" in b:
+        return "AXIS"
+
+    return base  # fallback
 
 
 def add_all_sheets_for_statement(wb: Workbook, statement_path: str, kw_df: pd.DataFrame,
                                 coa_lookup_by_name: dict, coa_name_by_pair: dict, refer_map: dict):
     base = os.path.splitext(os.path.basename(statement_path))[0]
-    display_name = BANK_NAME_MAP.get(base, base)
-    title_text = display_name
-    is_transaction_wise = base in TRANSACTION_WISE_STATEMENTS
+key = normalize_statement_key(base)
+
+display_name = BANK_NAME_MAP.get(key, key)
+is_transaction_wise = key in TRANSACTION_WISE_STATEMENTS
+
 
     header_row = find_header_row_xlsx(statement_path, sheet_name=0, required_headers=["Description", "Cr/Dr"])
     if header_row is None:
@@ -410,8 +423,9 @@ def add_all_sheets_for_statement(wb: Workbook, statement_path: str, kw_df: pd.Da
     bank["Ledger"] = bank[desc_col].apply(lambda x: map_ledger_from_keywords(x, kw_df))
 
     # ✅ Special split only for ICICI 6086 + Death Claim Payout
-    if base == "ICICI 6086":
-        bank = apply_icici6086_death_split(bank, desc_col, refer_map)
+    if key == "ICICI 6086":
+    bank = apply_icici6086_death_split(bank, desc_col, refer_map)
+
 
     total_cr = bank.loc[bank[crdr_col] == "CR", amt_col].sum()
     total_dr = bank.loc[bank[crdr_col] == "DR", amt_col].sum()
@@ -696,6 +710,15 @@ def run_daybook_from_uploaded_files(coa_bytes: bytes, zip_bytes: bytes) -> bytes
                 )
             except Exception as e:
                 errors.append(f"{os.path.basename(fp)} -> {e}")
+if errors:
+    ws_err = wb.create_sheet("Errors")
+    ws_err.append(["File", "Error"])
+    for e in errors:
+        parts = e.split(" -> ", 1)
+        if len(parts) == 2:
+            ws_err.append(parts)
+        else:
+            ws_err.append([e, ""])
 
         wb.save(out_path)
 
