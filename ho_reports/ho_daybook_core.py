@@ -21,7 +21,7 @@ BANK_NAME_MAP = {
 }
 
 DEFAULT_DEPARTMENT = "HO001"
-DEFAULT_BRANCH_ID = "HO001"
+DEFAULT_BRANCH_ID = "H0001"
 
 BANK_LEDGER_ACCOUNTS = {
     "311701", "311702", "311703", "311704", "311705", "311706", "311707", "311708",
@@ -82,6 +82,28 @@ def build_keyword_table(coa_df: pd.DataFrame) -> pd.DataFrame:
     return kw_df
 
 def map_ledger_from_keywords(description: str, kw_df: pd.DataFrame) -> str:
+    def split_by_references(df, desc_col, amt_col, refs):
+        """
+        Split rows by reference keywords in description.
+        Returns list of dicts: [{Ledger, Amount}, ...]
+        """
+        results = []
+
+        for ref in refs:
+            if not ref:
+                continue
+
+            mask = df[desc_col].str.upper().str.contains(ref.upper(), na=False)
+            if mask.any():
+                amt = df.loc[mask, amt_col].sum()
+                if abs(amt) > 0.01:
+                    results.append({
+                        "Ledger": ref,
+                        "Amount": amt
+                    })
+
+        return results
+
     d = str(description).upper()
     for _, r in kw_df.iterrows():
         if r["keyword"].upper() in d:
@@ -311,8 +333,39 @@ def add_all_sheets_for_statement(wb: Workbook, statement_path: str, kw_df: pd.Da
     # DayBook build (same)
     if not is_transaction_wise:
         bank_cr = bank[bank[crdr_col] == "CR"].copy()
-        receipts = bank_cr.groupby("Ledger", as_index=False)[amt_col].sum()
-        receipts = receipts[receipts["Ledger"] != "UNMAPPED"].rename(columns={amt_col: "Amount"})
+
+        # 🔥 SPECIAL LOGIC ONLY FOR ICICI 6086
+        if base == "ICICI 6086":
+
+            # Get COA references for Death Claim
+            death_row = coa_df[coa_df["Account Name"].str.contains("DEATH", case=False, na=False)]
+
+            if not death_row.empty:
+                refs = [
+                    str(death_row.iloc[0].get("Refer1", "")),
+                    str(death_row.iloc[0].get("Refer2", "")),
+                    str(death_row.iloc[0].get("Refer3", "")),
+                ]
+
+                split_rows = split_by_references(bank_cr, desc_col, amt_col, refs)
+
+                receipts = pd.DataFrame(split_rows)
+
+                # Other ledgers normal grouping
+                normal = bank_cr[~bank_cr[desc_col].str.contains("DEATH", case=False, na=False)]
+                normal_grp = normal.groupby("Ledger", as_index=False)[amt_col].sum()
+                normal_grp = normal_grp.rename(columns={amt_col: "Amount"})
+
+                receipts = pd.concat([receipts, normal_grp], ignore_index=True)
+
+            else:
+                receipts = bank_cr.groupby("Ledger", as_index=False)[amt_col].sum()
+                receipts = receipts.rename(columns={amt_col: "Amount"})
+
+        else:
+            receipts = bank_cr.groupby("Ledger", as_index=False)[amt_col].sum()
+            receipts = receipts.rename(columns={amt_col: "Amount"})
+
         mapped_receipt_total = receipts["Amount"].sum() if len(receipts) else 0.0
         receipt_diff = round(total_cr - mapped_receipt_total, 2)
         if abs(receipt_diff) > 0.01:
