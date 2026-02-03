@@ -14,12 +14,14 @@ from ho_reports.ho_daybook_core import run_daybook_from_uploaded_files
 
 load_global_css()
 
-warnings.filterwarnings("ignore", category=UserWarning)
-st.set_page_config(
-    page_title="GSTR-1 State-wise Automation",
-    page_icon="📊",
-    layout="wide"
-)
+st.markdown("""
+<h1 style='font-size:38px; font-weight:700;'>
+📊 HO Team- Reports Automisation
+</h1>
+""", unsafe_allow_html=True)
+
+st.markdown("🔎 Select Report (type to search)")
+
 
 # ✅ ADD BELOW THIS LINE
 ho_report = st.selectbox(
