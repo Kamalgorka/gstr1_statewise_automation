@@ -3,20 +3,18 @@ import re
 import zipfile
 import tempfile
 import pandas as pd
-from io import BytesIO
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 # =========================
-# SETTINGS (same as your script)
+# SETTINGS
 # =========================
 TRANSACTION_WISE_STATEMENTS = {"ICICI 7021"}
 
 BANK_NAME_MAP = {
     "ICICI 7021": "ICICI Bank - 008205007021 - C",
     "ICICI 6086": "ICICI Bank - 008205006086 - C",
-    # ✅ your COA exact bank ledger name
     "AXIS": "Axis Bank- 91402006845861 - C",
 }
 
@@ -34,7 +32,7 @@ ICICI6086_SPLIT_LEDGER = "Death Claim Payout"
 
 
 # =========================
-# HELPERS (same as your script)
+# HELPERS
 # =========================
 def find_header_row_xlsx(file_path, sheet_name=None, required_headers=None, max_scan_rows=80):
     preview = pd.read_excel(file_path, sheet_name=sheet_name, header=None, nrows=max_scan_rows)
@@ -97,7 +95,7 @@ def build_keyword_table(coa_df: pd.DataFrame) -> pd.DataFrame:
 def map_ledger_from_keywords(description: str, kw_df: pd.DataFrame) -> str:
     d = str(description).upper()
     for _, r in kw_df.iterrows():
-        if r["keyword"].upper() in d:
+        if str(r["keyword"]).upper() in d:
             return r["ledger"]
     return "UNMAPPED"
 
@@ -185,7 +183,7 @@ def make_cv_reference(to_bank_name: str, from_bank_name: str) -> str:
 
 
 # =========================
-# ✅ NEW: Refer Map + ICICI6086 Split
+# ✅ Refer Map + ICICI 6086 Split
 # =========================
 def build_refer_map(coa_df: pd.DataFrame) -> dict:
     """
@@ -228,18 +226,18 @@ def apply_icici6086_death_split(bank_df: pd.DataFrame, desc_col: str, refer_map:
     b = bank_df.copy()
     desc_upper = b[desc_col].astype(str).str.upper()
 
-    def split_ledger(i):
-        ledger = clean_text(b.loc[i, "Ledger"])
-        if ledger != target:
-            return ledger
-
-        d = desc_upper.loc[i]
+    def resolve_split(desc_u: str) -> str:
         for ref in refs:
-            if clean_text(ref).upper() in d:
+            ref_u = clean_text(ref).upper()
+            if ref_u and ref_u in desc_u:
                 return f"{target} | {clean_text(ref)}"
-        return ledger
+        return target
 
-    b["Ledger"] = [split_ledger(i) for i in b.index]
+    # only change those rows which are mapped to target ledger
+    mask = b["Ledger"].astype(str).str.strip().eq(target)
+    if mask.any():
+        b.loc[mask, "Ledger"] = desc_upper.loc[mask].apply(resolve_split)
+
     return b
 
 
@@ -291,7 +289,7 @@ def create_entry_df(daybook_df: pd.DataFrame, bank_display_name: str, coa_lookup
         if abs(amt_val) < 0.01:
             continue
 
-        # ✅ For split ledgers: "Death Claim Payout | KOTAK LIFE..."
+        # split ledger support: "Death Claim Payout | KOTAK ..."
         base_ledger = ledger_name.split("|")[0].strip() if "|" in ledger_name else ledger_name
         led_acc, led_sub = coa_lookup_by_name.get(base_ledger, ("", ""))
 
@@ -350,6 +348,9 @@ def create_entry_df(daybook_df: pd.DataFrame, bank_display_name: str, coa_lookup
     return pd.DataFrame(rows, columns=entry_cols)
 
 
+# =========================
+# STATEMENT COLUMN DETECTOR
+# =========================
 def detect_statement_columns(bank: pd.DataFrame, base_name: str):
     cols = [str(c).strip() for c in bank.columns]
     bank.columns = cols
@@ -375,7 +376,10 @@ def detect_statement_columns(bank: pd.DataFrame, base_name: str):
             raise ValueError(f"{base_name}: Could not find 'DR|CR' column in AXIS statement.")
         crdr_col = crdr_candidates[0]
 
-        amt_candidates = [c for c in cols if "AMOUNT" in c.upper() and "INR" in c.upper() and "BALANCE" not in c.upper()]
+        amt_candidates = [
+            c for c in cols
+            if "AMOUNT" in c.upper() and "INR" in c.upper() and "BALANCE" not in c.upper()
+        ]
         if not amt_candidates:
             raise ValueError(f"{base_name}: Could not find 'Amount(INR)' column in AXIS statement.")
         amt_col = amt_candidates[0]
@@ -383,27 +387,36 @@ def detect_statement_columns(bank: pd.DataFrame, base_name: str):
         return desc_col, crdr_col, amt_col
 
     raise ValueError(f"{base_name}: Unknown statement format.")
+
+
 def normalize_statement_key(base: str) -> str:
     b = str(base).upper().strip()
-
     if "ICICI" in b and "6086" in b:
         return "ICICI 6086"
     if "ICICI" in b and "7021" in b:
         return "ICICI 7021"
     if "AXIS" in b:
         return "AXIS"
+    return base
 
-    return base  # fallback
 
-
-def add_all_sheets_for_statement(wb: Workbook, statement_path: str, kw_df: pd.DataFrame,
-                                coa_lookup_by_name: dict, coa_name_by_pair: dict, refer_map: dict):
+# =========================
+# MAIN PER-STATEMENT BUILDER
+# =========================
+def add_all_sheets_for_statement(
+    wb: Workbook,
+    statement_path: str,
+    kw_df: pd.DataFrame,
+    coa_lookup_by_name: dict,
+    coa_name_by_pair: dict,
+    refer_map: dict
+):
     base = os.path.splitext(os.path.basename(statement_path))[0]
-key = normalize_statement_key(base)
+    key = normalize_statement_key(base)
 
-display_name = BANK_NAME_MAP.get(key, key)
-is_transaction_wise = key in TRANSACTION_WISE_STATEMENTS
-
+    display_name = BANK_NAME_MAP.get(key, key)
+    title_text = display_name
+    is_transaction_wise = key in TRANSACTION_WISE_STATEMENTS
 
     header_row = find_header_row_xlsx(statement_path, sheet_name=0, required_headers=["Description", "Cr/Dr"])
     if header_row is None:
@@ -414,7 +427,7 @@ is_transaction_wise = key in TRANSACTION_WISE_STATEMENTS
     bank = pd.read_excel(statement_path, sheet_name=0, header=header_row)
     bank.columns = [str(c).strip() for c in bank.columns]
 
-    desc_col, crdr_col, amt_col = detect_statement_columns(bank, base)
+    desc_col, crdr_col, amt_col = detect_statement_columns(bank, key)
 
     bank[desc_col] = bank[desc_col].astype(str)
     bank[crdr_col] = bank[crdr_col].astype(str).str.strip().str.upper()
@@ -424,17 +437,17 @@ is_transaction_wise = key in TRANSACTION_WISE_STATEMENTS
 
     # ✅ Special split only for ICICI 6086 + Death Claim Payout
     if key == "ICICI 6086":
-    bank = apply_icici6086_death_split(bank, desc_col, refer_map)
-
+        bank = apply_icici6086_death_split(bank, desc_col, refer_map)
 
     total_cr = bank.loc[bank[crdr_col] == "CR", amt_col].sum()
     total_dr = bank.loc[bank[crdr_col] == "DR", amt_col].sum()
 
-    # DayBook build (same)
+    # DayBook build
     if not is_transaction_wise:
         bank_cr = bank[bank[crdr_col] == "CR"].copy()
         receipts = bank_cr.groupby("Ledger", as_index=False)[amt_col].sum()
-        receipts = receipts[receipts["Ledger"] != "UNMAPPED"].rename(columns={amt_col: "Amount"})
+        receipts = receipts[receipts["Ledger"].str.upper() != "UNMAPPED"].rename(columns={amt_col: "Amount"})
+
         mapped_receipt_total = receipts["Amount"].sum() if len(receipts) else 0.0
         receipt_diff = round(total_cr - mapped_receipt_total, 2)
         if abs(receipt_diff) > 0.01:
@@ -442,7 +455,8 @@ is_transaction_wise = key in TRANSACTION_WISE_STATEMENTS
 
         bank_dr = bank[bank[crdr_col] == "DR"].copy()
         payments = bank_dr.groupby("Ledger", as_index=False)[amt_col].sum()
-        payments = payments[payments["Ledger"] != "UNMAPPED"].rename(columns={amt_col: "Amount"})
+        payments = payments[payments["Ledger"].str.upper() != "UNMAPPED"].rename(columns={amt_col: "Amount"})
+
         mapped_payment_total = payments["Amount"].sum() if len(payments) else 0.0
         payment_diff = round(total_dr - mapped_payment_total, 2)
         if abs(payment_diff) > 0.01:
@@ -451,6 +465,7 @@ is_transaction_wise = key in TRANSACTION_WISE_STATEMENTS
         receipts = move_others_last_df(receipts.sort_values("Ledger").reset_index(drop=True))
         payments = move_others_last_df(payments.sort_values("Ledger").reset_index(drop=True))
         daybook_df = make_daybook_layout_from_lists(receipts, payments)
+
     else:
         cr_list = bank[(bank[crdr_col] == "CR") & (bank["Ledger"].str.upper() != "UNMAPPED")][["Ledger", amt_col]].copy()
         cr_list = cr_list.rename(columns={amt_col: "Amount"})
@@ -566,6 +581,7 @@ is_transaction_wise = key in TRANSACTION_WISE_STATEMENTS
 
     last_data_row = start_row + len(write_df)
     total_row = last_data_row + 1
+
     ws.cell(row=total_row, column=1, value="TOTAL").font = bold
     ws.cell(row=total_row, column=1).fill = header_fill
     ws.cell(row=total_row, column=1).border = border
@@ -574,6 +590,7 @@ is_transaction_wise = key in TRANSACTION_WISE_STATEMENTS
     ws.cell(row=total_row, column=2).number_format = "#,##0.00"
     ws.cell(row=total_row, column=2).alignment = Alignment(horizontal="right")
     ws.cell(row=total_row, column=2).border = border
+
     ws.cell(row=total_row, column=3, value="TOTAL").font = bold
     ws.cell(row=total_row, column=3).fill = header_fill
     ws.cell(row=total_row, column=3).border = border
@@ -601,24 +618,30 @@ is_transaction_wise = key in TRANSACTION_WISE_STATEMENTS
         ledger_val = str(mapping_df.loc[r, "Ledger"]).strip().upper()
         is_unmapped = ledger_val == "UNMAPPED"
         excel_row = r + 2
+
         if not is_unmapped:
             ws2.row_dimensions[excel_row].hidden = True
+
         for c, col_name in enumerate(mapping_df.columns, start=1):
             val = mapping_df.loc[r, col_name]
             cell = ws2.cell(row=excel_row, column=c, value=val)
+
             if col_name.upper() == "AMOUNT":
                 cell.number_format = "#,##0.00"
                 cell.alignment = Alignment(horizontal="right", vertical="center")
             else:
                 cell.alignment = Alignment(horizontal="left", vertical="center")
+
             if is_unmapped:
                 cell.fill = unmapped_fill
+
             cell.border = border
 
     last_row = len(mapping_df) + 1
     last_col = len(mapping_df.columns)
     last_col_letter = chr(64 + last_col)
     table_ref = f"A1:{last_col_letter}{last_row}"
+
     tbl_name = f"Tbl_{abs(hash(mp_name)) % 10_000_000}"
     table = Table(displayName=tbl_name, ref=table_ref)
     table.tableStyleInfo = TableStyleInfo(
@@ -646,11 +669,13 @@ is_transaction_wise = key in TRANSACTION_WISE_STATEMENTS
         for c, col_name in enumerate(entry_df.columns, start=1):
             val = entry_df.iloc[r][col_name]
             cell = ws3.cell(row=excel_row, column=c, value=val)
+
             if col_name in ["Debit", "Credit"] and val != "" and val is not None:
                 cell.number_format = "#,##0.00"
                 cell.alignment = Alignment(horizontal="right", vertical="center")
             else:
                 cell.alignment = Alignment(horizontal="left", vertical="center")
+
             cell.border = border
 
     ws3.freeze_panes = "A2"
@@ -676,15 +701,14 @@ def run_daybook_from_uploaded_files(coa_bytes: bytes, zip_bytes: bytes) -> bytes
             f.write(zip_bytes)
 
         coa = pd.read_excel(coa_path, sheet_name=0)
-
-        # ✅ used for split (Refer1..ReferN)
         refer_map = build_refer_map(coa)
-
         kw_df = build_keyword_table(coa)
         coa_lookup_by_name, coa_name_by_pair = build_coa_lookup(coa)
 
         wb = Workbook()
-        wb.remove(wb.active)
+        # keep at least one sheet initially (prevents "at least one sheet must be visible")
+        ws_init = wb.active
+        ws_init.title = "Init"
 
         extract_dir = os.path.join(tmpdir, "unzipped")
         os.makedirs(extract_dir, exist_ok=True)
@@ -693,14 +717,16 @@ def run_daybook_from_uploaded_files(coa_bytes: bytes, zip_bytes: bytes) -> bytes
 
         statement_files = []
         for root, _, files in os.walk(extract_dir):
-            for f in files:
-                if f.lower().endswith(".xlsx") and not f.startswith("~$"):
-                    statement_files.append(os.path.join(root, f))
+            for fn in files:
+                if fn.lower().endswith(".xlsx") and not fn.startswith("~$"):
+                    statement_files.append(os.path.join(root, fn))
 
         if not statement_files:
             raise ValueError("No .xlsx bank statements found inside the ZIP.")
 
         errors = []
+        created_any = False
+
         for fp in sorted(statement_files):
             try:
                 add_all_sheets_for_statement(
@@ -708,21 +734,31 @@ def run_daybook_from_uploaded_files(coa_bytes: bytes, zip_bytes: bytes) -> bytes
                     coa_lookup_by_name, coa_name_by_pair,
                     refer_map
                 )
+                created_any = True
             except Exception as e:
                 errors.append(f"{os.path.basename(fp)} -> {e}")
-if errors:
-    ws_err = wb.create_sheet("Errors")
-    ws_err.append(["File", "Error"])
-    for e in errors:
-        parts = e.split(" -> ", 1)
-        if len(parts) == 2:
-            ws_err.append(parts)
+
+        # Remove Init only if something else got created OR we will add Errors sheet
+        if errors:
+            ws_err = wb.create_sheet("Errors")
+            ws_err.append(["File", "Error"])
+            for e in errors:
+                parts = e.split(" -> ", 1)
+                if len(parts) == 2:
+                    ws_err.append([parts[0], parts[1]])
+                else:
+                    ws_err.append([e, ""])
+            created_any = True
+
+        # If nothing created at all (all failed), keep Init and put message
+        if not created_any:
+            ws_init["A1"] = "No sheets could be created. Please check Errors / input files."
         else:
-            ws_err.append([e, ""])
+            # safe to remove Init if we have other sheets
+            if "Init" in wb.sheetnames and len(wb.sheetnames) > 1:
+                wb.remove(wb["Init"])
 
         wb.save(out_path)
 
         with open(out_path, "rb") as f:
-            output_bytes = f.read()
-
-        return output_bytes
+            return f.read()
