@@ -25,7 +25,7 @@ st.markdown("🔎 Select Report (type to search)")
 
 # ✅ ADD BELOW THIS LINE
 ho_report = st.selectbox(
-    "",
+    "Select HO Report",
     [
         "1) GSTR-1 State-wise Automation",
         "2) HO DayBook Automation"
